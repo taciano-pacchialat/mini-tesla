@@ -1,0 +1,29 @@
+{
+  "configurations": [
+    {
+      "name": "ESP-IDF",
+      "compilerPath": "${config:idf.toolsPath}/tools/xtensa-esp-elf/esp-15.1.0_20250607/xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc",
+      "compileCommands": "${workspaceFolder}/build/compile_commands.json",
+      "includePath": [
+        "${config:idf.espIdfPath}/components/**",
+        "${config:idf.espIdfPathWin}/components/**",
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/build/config"
+      ],
+      "browse": {
+        "path": [
+          "${config:idf.espIdfPath}/components",
+          "${config:idf.espIdfPathWin}/components",
+          "${workspaceFolder}",
+          "${workspaceFolder}/build/config"
+        ],
+        "limitSymbolsToIncludedHeaders": false
+      },
+      "defines": [],
+      "cStandard": "c11",
+      "cppStandard": "c++17",
+      "forcedInclude": ["${workspaceFolder}/build/config/sdkconfig.h"]
+    }
+  ],
+  "version": 4
+}
