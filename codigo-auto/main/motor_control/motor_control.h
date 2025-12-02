@@ -1,9 +1,9 @@
 /**
  * @file motor_control.h
- * @brief Motor Control using MCPWM for differential drive robot
+ * @brief Motor Control using LEDC for L298N motor driver
  *
  * Provides PWM-based speed control for left and right motors.
- * Uses ESP32's MCPWM (Motor Control PWM) peripheral for precise control.
+ * L298N requires: ENA/ENB (PWM) + IN1/IN2 (direction) per motor.
  */
 
 #ifndef MOTOR_CONTROL_H
@@ -17,25 +17,30 @@ extern "C"
 {
 #endif
 
-// Motor GPIO pin definitions (configurable via menuconfig or here)
-#define MOTOR_LEFT_PWM_GPIO 25  // PWM signal for left motor
-#define MOTOR_LEFT_DIR_GPIO 26  // Direction control for left motor
-#define MOTOR_RIGHT_PWM_GPIO 27 // PWM signal for right motor
-#define MOTOR_RIGHT_DIR_GPIO 14 // Direction control for right motor
+// Motor GPIO pin definitions for ESP32-CAM with L298N
+// Motor A (Left) - ENA=GPIO4, IN1=GPIO2, IN2=GPIO14
+#define MOTOR_LEFT_PWM_GPIO 4  // ENA - PWM signal
+#define MOTOR_LEFT_IN1_GPIO 2  // IN1 - Direction bit 1
+#define MOTOR_LEFT_IN2_GPIO 14 // IN2 - Direction bit 2
+
+// Motor B (Right) - ENB=GPIO12, IN3=GPIO15, IN4=GPIO13
+#define MOTOR_RIGHT_PWM_GPIO 12 // ENB - PWM signal
+#define MOTOR_RIGHT_IN1_GPIO 15 // IN3 - Direction bit 1
+#define MOTOR_RIGHT_IN2_GPIO 13 // IN4 - Direction bit 2
 
 // PWM configuration
 #define MOTOR_PWM_FREQ_HZ 1000            // 1 kHz PWM frequency
 #define MOTOR_TIMER_RESOLUTION_HZ 1000000 // 1 MHz timer resolution
 
 // Speed limits
-#define MOTOR_SPEED_MIN  -255 // Full reverse
-#define MOTOR_SPEED_MAX  255  // Full forward
-#define MOTOR_SPEED_STOP 0    // Stop
+#define MOTOR_SPEED_MIN -255 // Full reverse
+#define MOTOR_SPEED_MAX 255  // Full forward
+#define MOTOR_SPEED_STOP 0   // Stop
 
     /**
      * @brief Initialize motor control system
      *
-     * Configures MCPWM peripheral and GPIO pins for both motors.
+     * Configures LEDC PWM and GPIO pins for L298N motor driver.
      * Motors are initialized in stopped state.
      *
      * @return ESP_OK on success, error code otherwise
@@ -45,9 +50,9 @@ extern "C"
     /**
      * @brief Set speed for both motors
      *
-     * @param left_speed Speed for left motor (-100 to 100)
+     * @param left_speed Speed for left motor (-255 to 255)
      *                   Negative = reverse, Positive = forward
-     * @param right_speed Speed for right motor (-100 to 100)
+     * @param right_speed Speed for right motor (-255 to 255)
      * @return ESP_OK on success
      */
     esp_err_t motor_set_speed(int left_speed, int right_speed);
@@ -55,7 +60,7 @@ extern "C"
     /**
      * @brief Set speed for left motor only
      *
-     * @param speed Speed (-100 to 100)
+     * @param speed Speed (-255 to 255)
      * @return ESP_OK on success
      */
     esp_err_t motor_set_left(int speed);
@@ -63,40 +68,25 @@ extern "C"
     /**
      * @brief Set speed for right motor only
      *
-     * @param speed Speed (-100 to 100)
+     * @param speed Speed (-255 to 255)
      * @return ESP_OK on success
      */
     esp_err_t motor_set_right(int speed);
 
     /**
-     * @brief Emergency stop - immediately stop both motors
+     * @brief Emergency stop - immediately stops both motors
      *
      * @return ESP_OK on success
      */
     esp_err_t motor_emergency_stop(void);
 
     /**
-     * @brief Get current left motor speed
+     * @brief Get current motor speeds
      *
-     * @return Current speed (-100 to 100)
+     * @param left_speed Pointer to store left motor speed
+     * @param right_speed Pointer to store right motor speed
      */
-    int motor_get_left_speed(void);
-
-    /**
-     * @brief Get current right motor speed
-     *
-     * @return Current speed (-100 to 100)
-     */
-    int motor_get_right_speed(void);
-
-    /**
-     * @brief Deinitialize motor control
-     *
-     * Stops motors and releases MCPWM resources.
-     *
-     * @return ESP_OK on success
-     */
-    esp_err_t motor_control_deinit(void);
+    void motor_get_speeds(int *left_speed, int *right_speed);
 
 #ifdef __cplusplus
 }

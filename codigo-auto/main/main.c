@@ -4,13 +4,14 @@
  *
  * Architecture:
  * - Core 0: WiFi, WebSocket, Status Transmission
- * - Core 1: Autonomous Control, Battery Monitoring
+ * - Core 1: Vision Processing, Autonomous Control
  *
  * Components:
  * - WiFi Station: Connects to ESP32-S3 SoftAP
  * - WebSocket Client: Bidirectional communication
  * - Motor Control: MCPWM-based differential drive
- * - Autonomous Task: Reactive control logic
+ * - Autonomous Task: Reactive control logic with local veto
+ * - Vision Engine: Local obstacle detection (green objects)
  */
 
 #include <stdio.h>
@@ -27,6 +28,7 @@
 #include "ws_client/ws_client.h"
 #include "motor_control/motor_control.h"
 #include "autonomous_task/autonomous_task.h"
+#include "vision_engine/vision_engine.h"
 
 static const char *TAG = "[Main]";
 
@@ -68,9 +70,15 @@ static void telemetry_received_callback(const telemetry_data_t *data)
 }
 
 /**
- * @brief Task: Autonomous Control Loop
+ * @brief Task: Autonomous Control Loop with Vision Fusion
  * Runs on Core 1 (Application CPU)
  * Priority: 6 (High)
+ *
+ * Implements fusion logic:
+ * - Reads remote telemetry from WebSocket
+ * - Reads local vision veto flag
+ * - If local veto active: BLOCK forward motion (safety override)
+ * - Otherwise: Execute remote telemetry commands
  */
 static void control_task(void *pvParameters)
 {
@@ -82,16 +90,32 @@ static void control_task(void *pvParameters)
 
     while (1)
     {
-        // Wait for telemetry data from queue
+        // Check local vision veto status
+        bool local_veto = vision_engine_is_veto_active();
+
+        // Wait for remote telemetry data from queue
         if (xQueueReceive(telemetry_queue, &telemetry, pdMS_TO_TICKS(100)) == pdTRUE)
         {
             last_telemetry_time = xTaskGetTickCount();
 
-            // Process telemetry and update motor commands
-            autonomous_process_telemetry(&telemetry);
+            // FUSION LOGIC: Process telemetry with local veto override
+            autonomous_process_with_veto(&telemetry, local_veto);
+
+            if (local_veto)
+            {
+                ESP_LOGW(TAG, "⚠️  VETO: Local camera blocked forward motion");
+            }
         }
         else
         {
+            // No remote telemetry received
+            // Still check local veto for safety
+            if (local_veto)
+            {
+                ESP_LOGW(TAG, "Local veto active - motors stopped");
+                motor_emergency_stop();
+            }
+
             // Check if we haven't received telemetry for too long
             if ((xTaskGetTickCount() - last_telemetry_time) > telemetry_timeout)
             {
@@ -134,9 +158,8 @@ static void status_tx_task(void *pvParameters)
 
         if (bits & WEBSOCKET_CONNECTED_BIT)
         {
-            // Get current motor speeds
-            status.motor_left = motor_get_left_speed();
-            status.motor_right = motor_get_right_speed();
+            // Get current motor speeds using the correct API
+            motor_get_speeds(&status.motor_left, &status.motor_right);
 
             // Get battery voltage (simplified - using fixed value)
             // In real implementation, read from ADC
@@ -171,12 +194,16 @@ static void monitor_task(void *pvParameters)
 
     while (1)
     {
+        // Get motor speeds for logging
+        int left_speed, right_speed;
+        motor_get_speeds(&left_speed, &right_speed);
+
         // Log system status periodically
         ESP_LOGI(TAG, "Status: WiFi=%s, WebSocket=%s, State=%s, Motors=[L:%d, R:%d]",
                  wifi_station_is_connected() ? "OK" : "DISCONNECTED",
                  ws_client_is_connected() ? "OK" : "DISCONNECTED",
                  autonomous_state_to_string(autonomous_get_state()),
-                 motor_get_left_speed(), motor_get_right_speed());
+                 left_speed, right_speed);
 
         // Check for emergency conditions
         if (!wifi_station_is_connected())
@@ -223,6 +250,27 @@ void app_main(void)
     {
         ESP_LOGE(TAG, "Failed to initialize motor control");
         return;
+    }
+
+    // Initialize vision engine (local camera-based obstacle detection)
+    ESP_LOGI(TAG, "Initializing vision engine...");
+    if (vision_engine_init() != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Failed to initialize vision engine");
+        ESP_LOGW(TAG, "Continuing without local vision (veto disabled)");
+        // Don't return - can operate without local vision, just without veto
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Starting vision processing task...");
+        if (vision_engine_start() != ESP_OK)
+        {
+            ESP_LOGE(TAG, "Failed to start vision task");
+        }
+        else
+        {
+            ESP_LOGI(TAG, "Vision engine running on Core 1");
+        }
     }
 
     // Initialize autonomous control

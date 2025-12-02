@@ -159,6 +159,62 @@ esp_err_t autonomous_process_telemetry(const telemetry_data_t *telemetry)
     return ESP_OK;
 }
 
+esp_err_t autonomous_process_with_veto(const telemetry_data_t *telemetry, bool local_veto)
+{
+    if (telemetry == NULL)
+    {
+        ESP_LOGW(TAG, "Null telemetry data received");
+        return ESP_FAIL;
+    }
+
+    // VETO SYSTEM: Local vision takes priority over remote commands
+    if (local_veto)
+    {
+        ESP_LOGW(TAG, "🛑 LOCAL VETO ACTIVE: Green obstacle detected by camera!");
+        ESP_LOGW(TAG, "Blocking forward motion regardless of remote telemetry");
+
+        // Force stop - safety override
+        behavior_stop();
+        return ESP_OK;
+    }
+
+    // No local veto - process normal telemetry
+    ESP_LOGD(TAG, "No local veto - processing remote telemetry");
+
+    // Log telemetry data
+    ESP_LOGI(TAG, "Remote: detected=%d, object=%s, distance=%.1f cm, angle=%.1f deg",
+             telemetry->detected, telemetry->object_type,
+             telemetry->distance_cm, telemetry->angle_deg);
+
+    // Decision logic based on remote telemetry
+    if (!telemetry->detected)
+    {
+        // No target detected - search for it
+        behavior_search();
+    }
+    else
+    {
+        // Target detected - check distance
+        if (telemetry->distance_cm < DISTANCE_STOP_THRESHOLD_CM)
+        {
+            // Too close - stop to avoid collision
+            behavior_stop();
+        }
+        else if (telemetry->distance_cm <= DISTANCE_FOLLOW_MAX_CM)
+        {
+            // Within follow range - track the target
+            behavior_follow(telemetry->distance_cm, telemetry->angle_deg);
+        }
+        else
+        {
+            // Target too far - search mode
+            behavior_search();
+        }
+    }
+
+    return ESP_OK;
+}
+
 control_state_t autonomous_get_state(void)
 {
     control_state_t state = STATE_SEARCHING;

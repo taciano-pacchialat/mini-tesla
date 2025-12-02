@@ -1,11 +1,12 @@
 /**
  * @file autonomous_task.h
- * @brief Autonomous control logic for target tracking
+ * @brief Autonomous control logic for target tracking with local veto system
  * 
- * Implements reactive behavior based on telemetry:
+ * Implements reactive behavior based on telemetry with local obstacle override:
  * - STOP: Obstacle too close (< 30cm)
  * - FOLLOW: Target detected, adjust trajectory using angle
  * - SEARCH: No target detected, rotate to find it
+ * - VETO: Local vision detected obstacle, blocks forward commands
  */
 
 #ifndef AUTONOMOUS_TASK_H
@@ -13,6 +14,7 @@
 
 #include "esp_err.h"
 #include "ws_client.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -43,9 +45,25 @@ typedef enum {
 esp_err_t autonomous_init(void);
 
 /**
+ * @brief Process telemetry with local vision veto system
+ * 
+ * This function implements the fusion logic between remote telemetry
+ * and local obstacle detection:
+ * 
+ * - If local vision detects GREEN obstacle within safety distance,
+ *   VETO is activated and forward motion is blocked
+ * - Otherwise, follows remote telemetry commands normally
+ * 
+ * @param telemetry Pointer to remote telemetry data
+ * @param local_veto True if local vision detected obstacle
+ * @return ESP_OK on success
+ */
+esp_err_t autonomous_process_with_veto(const telemetry_data_t *telemetry, bool local_veto);
+
+/**
  * @brief Process telemetry and update motor commands
  * 
- * This is the main control loop function.
+ * This is the legacy function without veto.
  * Should be called when new telemetry data arrives.
  * 
  * @param telemetry Pointer to telemetry data
