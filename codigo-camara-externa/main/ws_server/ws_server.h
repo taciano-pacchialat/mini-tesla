@@ -6,6 +6,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+typedef enum {
+    FRAME_SOURCE_ESP32S3 = 0,
+    FRAME_SOURCE_ESP32CAM = 1,
+} frame_source_t;
+
 /**
  * @brief Estructura para datos de telemetría
  */
@@ -60,7 +65,9 @@ esp_err_t ws_server_send_telemetry(const telemetry_data_t *telemetry);
  * @param jpeg_len Tamaño del buffer
  * @return ESP_OK si se envió correctamente
  */
-esp_err_t ws_server_send_video_frame(const uint8_t *jpeg_data, size_t jpeg_len);
+esp_err_t ws_server_send_video_frame(frame_source_t source,
+                                     const uint8_t *jpeg_data,
+                                     size_t jpeg_len);
 
 /**
  * @brief Obtiene el número de clientes WebSocket conectados

@@ -81,6 +81,14 @@ extern "C" {
 #define HSV_GREEN_V_MIN     50   // Minimum brightness (avoid dark shadows)
 #define HSV_GREEN_V_MAX     255  // Maximum brightness
 
+// ORANGE target detection (autito naranja)
+#define HSV_ORANGE_H_MIN    10
+#define HSV_ORANGE_H_MAX    30
+#define HSV_ORANGE_S_MIN    60
+#define HSV_ORANGE_S_MAX    255
+#define HSV_ORANGE_V_MIN    80
+#define HSV_ORANGE_V_MAX    255
+
 // Morphological filtering (noise removal)
 #define MORPH_KERNEL_SIZE   3    // 3x3 kernel for erosion/dilation
 

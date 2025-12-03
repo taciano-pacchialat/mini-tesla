@@ -290,6 +290,40 @@ esp_err_t ws_client_send_status(const vehicle_status_t *status)
     return ESP_OK;
 }
 
+esp_err_t ws_client_send_frame(const uint8_t *frame, size_t length)
+{
+    if (frame == NULL || length == 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (length > WS_MAX_PAYLOAD_SIZE)
+    {
+        ESP_LOGW(TAG, "JPEG demasiado grande (%d bytes > %d) - descartado",
+                 (int)length, WS_MAX_PAYLOAD_SIZE);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    if (s_client == NULL || !ws_client_is_connected())
+    {
+        ESP_LOGW(TAG, "Cannot send frame: WebSocket no conectado");
+        return ESP_FAIL;
+    }
+
+    int sent = esp_websocket_client_send_bin(s_client,
+                                             (const char *)frame,
+                                             length,
+                                             pdMS_TO_TICKS(1000));
+    if (sent < 0)
+    {
+        ESP_LOGE(TAG, "Error enviando frame binario (%d bytes)", (int)length);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "Frame binario enviado: %d bytes", sent);
+    return ESP_OK;
+}
+
 bool ws_client_is_connected(void)
 {
     return s_is_connected && (s_client != NULL) &&

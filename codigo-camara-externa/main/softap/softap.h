@@ -7,8 +7,8 @@
  * @brief Configuración del SoftAP
  */
 #define SOFTAP_SSID "ESP32-Vision-Bot"
-#define SOFTAP_PASSWORD "vision2025"
-#define SOFTAP_CHANNEL 1
+#define SOFTAP_PASSWORD "12345678"  // Mínimo 8 caracteres para WPA2
+#define SOFTAP_CHANNEL 6          // Canal 6 suele tener menos interferencia
 #define SOFTAP_MAX_CONNECTIONS 4
 
 /**

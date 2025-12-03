@@ -104,7 +104,7 @@ static void vision_task_function(void *pvParameters)
             if (frame_to_jpeg(fb, &jpeg_data, &jpeg_len))
             {
                 // Enviar frame por WebSocket (asíncrono)
-                ws_server_send_video_frame(jpeg_data, jpeg_len);
+                ws_server_send_video_frame(FRAME_SOURCE_ESP32S3, jpeg_data, jpeg_len);
                 free(jpeg_data);
             }
         }

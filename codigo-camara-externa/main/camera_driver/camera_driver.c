@@ -9,7 +9,6 @@ esp_err_t camera_init(void)
     camera_config_t config = {
         .pin_pwdn = CAM_PIN_PWDN,
         .pin_reset = CAM_PIN_RESET,
-        .pin_xclk = CAM_PIN_XCLK,
         .pin_sccb_sda = CAM_PIN_SIOD,
         .pin_sccb_scl = CAM_PIN_SIOC,
 
@@ -25,18 +24,18 @@ esp_err_t camera_init(void)
         .pin_href = CAM_PIN_HREF,
         .pin_pclk = CAM_PIN_PCLK,
 
-        // XCLK configuración para módulos con oscilador
-        // Si tu módulo tiene oscilador, el pin XCLK no se usa pero la frecuencia debe especificarse
-        .xclk_freq_hz = 5000000, // 10MHz - frecuencia típica del oscilador interno
+        // XCLK reference still required even if the module has its own oscillator
+        .xclk_freq_hz = 20000000,
         .ledc_timer = LEDC_TIMER_0,
         .ledc_channel = LEDC_CHANNEL_0,
 
-        .pixel_format = PIXFORMAT_RGB565, // YUV422, GRAYSCALE, RGB565, JPEG
-        .frame_size = FRAMESIZE_HVGA,     // Reducir a VGA para debug (era SVGA)
+        // Procesamiento local necesita frames crudos para convertir a HSV
+        .pixel_format = PIXFORMAT_RGB565,
+        .frame_size = FRAMESIZE_QVGA,
 
-        .jpeg_quality = 12, // 0-63, for OV series camera sensors, lower number means higher quality
-        .fb_count = 1,      // When jpeg mode is used, if fb_count more than one, the driver will work in continuous mode.
-        .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+        .jpeg_quality = 12,
+        .fb_count = 2, // doble buffer para reducir tearing
+        .grab_mode = CAMERA_GRAB_LATEST,
         .fb_location = CAMERA_FB_IN_PSRAM};
 
     // Initialize the camera
@@ -56,28 +55,28 @@ esp_err_t camera_init(void)
     }
 
     // Initial settings - adjust as needed
-    s->set_brightness(s, 1);                 // -2 to 2
-    s->set_contrast(s, 1);                   // -2 to 2
-    s->set_saturation(s, 1);                 // -2 to 2
-    s->set_special_effect(s, 0);             // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
-    s->set_whitebal(s, 1);                   // 0 = disable , 1 = enable
-    s->set_awb_gain(s, 1);                   // 0 = disable , 1 = enable
-    s->set_wb_mode(s, 0);                    // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-    s->set_exposure_ctrl(s, 1);              // 0 = disable , 1 = enable
-    s->set_aec2(s, 0);                       // 0 = disable , 1 = enable
-    s->set_ae_level(s, 0);                   // -2 to 2
-    s->set_aec_value(s, 300);                // 0 to 1200
-    s->set_gain_ctrl(s, 1);                  // 0 = disable , 1 = enable
-    s->set_agc_gain(s, 0);                   // 0 to 30
-    s->set_gainceiling(s, (gainceiling_t)0); // 0 to 6
-    s->set_bpc(s, 0);                        // 0 = disable , 1 = enable
-    s->set_wpc(s, 1);                        // 0 = disable , 1 = enable
-    s->set_raw_gma(s, 1);                    // 0 = disable , 1 = enable
-    s->set_lenc(s, 1);                       // 0 = disable , 1 = enable
-    s->set_hmirror(s, 0);                    // 0 = disable , 1 = enable
-    s->set_vflip(s, 0);                      // 0 = disable , 1 = enable
-    s->set_dcw(s, 1);                        // 0 = disable , 1 = enable
-    s->set_colorbar(s, 0);                   // 0 = disable , 1 = enable
+    s->set_brightness(s, 0); // Ajustar en campo según iluminación
+    s->set_contrast(s, 0);
+    s->set_saturation(s, 0);
+    s->set_special_effect(s, 0); // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
+    s->set_whitebal(s, 1);       // 0 = disable , 1 = enable
+    s->set_awb_gain(s, 1);       // 0 = disable , 1 = enable
+    s->set_wb_mode(s, 0);        // 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
+    s->set_exposure_ctrl(s, 1);  // 0 = disable , 1 = enable
+    s->set_aec2(s, 0);           // 0 = disable , 1 = enable
+    s->set_ae_level(s, 0);       // -2 to 2
+    s->set_aec_value(s, 400);    // Exposición algo más larga para RGB565
+    s->set_gain_ctrl(s, 1);      // 0 = disable , 1 = enable
+    s->set_agc_gain(s, 8);
+    s->set_gainceiling(s, GAINCEILING_16X);
+    s->set_bpc(s, 1);
+    s->set_wpc(s, 1);
+    s->set_raw_gma(s, 1);
+    s->set_lenc(s, 1);     // 0 = disable , 1 = enable
+    s->set_hmirror(s, 0);  // 0 = disable , 1 = enable
+    s->set_vflip(s, 0);    // 0 = disable , 1 = enable
+    s->set_dcw(s, 1);      // 0 = disable , 1 = enable
+    s->set_colorbar(s, 0); // 0 = disable , 1 = enable
 
     ESP_LOGI(TAG, "Camera initialized successfully");
     return ESP_OK;

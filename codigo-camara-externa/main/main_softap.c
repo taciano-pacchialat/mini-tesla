@@ -110,7 +110,7 @@ void app_main(void)
     ESP_LOGI(TAG, "╠════════════════════════════════════════════════╣");
 #if USE_SOFTAP_MODE
     ESP_LOGI(TAG, "║ 1. Conectar WiFi a: ESP32-Vision-Bot           ║");
-    ESP_LOGI(TAG, "║ 2. Contraseña: vision2025                      ║");
+    ESP_LOGI(TAG, "║ 2. Contraseña: 12345678                        ║");
     ESP_LOGI(TAG, "║ 3. Abrir: http://192.168.4.1                   ║");
 #else
     ESP_LOGI(TAG, "║ URL: http://%s", ip_address);

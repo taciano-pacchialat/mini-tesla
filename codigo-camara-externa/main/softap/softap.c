@@ -94,9 +94,10 @@ esp_err_t softap_init(void)
             .channel = SOFTAP_CHANNEL,
             .password = SOFTAP_PASSWORD,
             .max_connection = SOFTAP_MAX_CONNECTIONS,
-            .authmode = WIFI_AUTH_WPA2_PSK,
+            .authmode = WIFI_AUTH_WPA_WPA2_PSK, // Modo mixto para mejor compatibilidad
             .pmf_cfg = {
                 .required = false,
+                .capable = true,
             },
         },
     };

@@ -7,9 +7,8 @@
 // Pines para ESP32-S3 (OV2640)
 #define CAM_PIN_PWDN -1
 #define CAM_PIN_RESET -1
-#define CAM_PIN_XCLK -1 // Módulo sin XCLK (usa oscilador interno)
-#define CAM_PIN_SIOD 6
-#define CAM_PIN_SIOC 5
+#define CAM_PIN_SIOD 14 // SDA - I2C Data (corregido de 6 a 4)
+#define CAM_PIN_SIOC 5  // SCL - I2C Clock
 
 #define CAM_PIN_D7 16
 #define CAM_PIN_D6 17
@@ -22,7 +21,7 @@
 
 #define CAM_PIN_VSYNC 7
 #define CAM_PIN_HREF 13
-#define CAM_PIN_PCLK 14
+#define CAM_PIN_PCLK 15
 
 /**
  * @brief Initialize the camera with predefined pins and configuration

@@ -11,6 +11,7 @@
 
 #include "vision_engine.h"
 #include "../hardware_config.h"
+#include "../ws_client/ws_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -18,6 +19,7 @@
 #include "freertos/semphr.h"
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 // OpenCV includes - using C-style port for ESP32
 // NOTE: esp32-camera component must be added to dependencies
@@ -28,6 +30,86 @@
 // #include "opencv2/imgproc.h"
 
 static const char *TAG = "[Vision]";
+
+#define STREAM_FRAME_INTERVAL 3
+#define STREAM_JPEG_QUALITY_DEFAULT 60
+#define STREAM_JPEG_QUALITY_MIN 30
+#define STREAM_JPEG_QUALITY_STEP 10
+
+typedef struct
+{
+    uint8_t h_min;
+    uint8_t h_max;
+    uint8_t s_min;
+    uint8_t s_max;
+    uint8_t v_min;
+    uint8_t v_max;
+    bool wrap;
+} hsv_range_t;
+
+static const hsv_range_t kGreenRange = {
+    .h_min = HSV_GREEN_H_MIN,
+    .h_max = HSV_GREEN_H_MAX,
+    .s_min = HSV_GREEN_S_MIN,
+    .s_max = HSV_GREEN_S_MAX,
+    .v_min = HSV_GREEN_V_MIN,
+    .v_max = HSV_GREEN_V_MAX,
+    .wrap = (HSV_GREEN_H_MIN > HSV_GREEN_H_MAX)};
+
+static inline void rgb565_to_hsv_fast(uint16_t pixel, uint8_t *h, uint8_t *s, uint8_t *v)
+{
+    uint8_t r = (pixel & 0xF800) >> 8;
+    uint8_t g = (pixel & 0x07E0) >> 3;
+    uint8_t b = (pixel & 0x001F) << 3;
+
+    uint8_t min_val = (r < g) ? (r < b ? r : b) : (g < b ? g : b);
+    uint8_t max_val = (r > g) ? (r > b ? r : b) : (g > b ? g : b);
+    uint8_t delta = max_val - min_val;
+
+    *v = max_val;
+
+    if (delta == 0)
+    {
+        *h = 0;
+        *s = 0;
+        return;
+    }
+
+    *s = (uint16_t)(delta << 8) / max_val;
+
+    if (r == max_val)
+    {
+        *h = (g >= b) ? (43 * (g - b)) / delta : 255 + (43 * (g - b)) / delta;
+    }
+    else if (g == max_val)
+    {
+        *h = 85 + (43 * (b - r)) / delta;
+    }
+    else
+    {
+        *h = 171 + (43 * (r - g)) / delta;
+    }
+}
+
+static inline bool hsv_in_range(uint8_t h, uint8_t s, uint8_t v, const hsv_range_t *range)
+{
+    if (s < range->s_min || s > range->s_max)
+    {
+        return false;
+    }
+
+    if (v < range->v_min || v > range->v_max)
+    {
+        return false;
+    }
+
+    if (!range->wrap)
+    {
+        return (h >= range->h_min) && (h <= range->h_max);
+    }
+
+    return (h >= range->h_min) || (h <= range->h_max);
+}
 
 // ============================================================================
 // GLOBAL STATE
@@ -43,6 +125,51 @@ static bool s_task_running = false;
 // Statistics
 static uint32_t s_frame_counter = 0;
 static uint64_t s_total_process_time_us = 0;
+
+static bool stream_frame_over_ws(camera_fb_t *fb)
+{
+    if (!ws_client_is_connected())
+    {
+        return false;
+    }
+
+    int quality = STREAM_JPEG_QUALITY_DEFAULT;
+
+    while (quality >= STREAM_JPEG_QUALITY_MIN)
+    {
+        uint8_t *jpeg_buf = NULL;
+        size_t jpeg_len = 0;
+
+        if (!frame2jpg(fb, quality, &jpeg_buf, &jpeg_len))
+        {
+            ESP_LOGE(TAG, "frame2jpg failed at quality %d", quality);
+            return false;
+        }
+
+        if (jpeg_len > (WS_MAX_PAYLOAD_SIZE - 128) && quality > STREAM_JPEG_QUALITY_MIN)
+        {
+            ESP_LOGW(TAG, "JPEG %d bytes > limit %d @Q%d, retrying",
+                     (int)jpeg_len, WS_MAX_PAYLOAD_SIZE, quality);
+            free(jpeg_buf);
+            quality -= STREAM_JPEG_QUALITY_STEP;
+            continue;
+        }
+
+        esp_err_t err = ws_client_send_frame(jpeg_buf, jpeg_len);
+        free(jpeg_buf);
+
+        if (err != ESP_OK)
+        {
+            ESP_LOGW(TAG, "WebSocket send failed: %s", esp_err_to_name(err));
+            return false;
+        }
+
+        return true;
+    }
+
+    ESP_LOGE(TAG, "Unable to compress frame under %d bytes", WS_MAX_PAYLOAD_SIZE);
+    return false;
+}
 
 // ============================================================================
 // CAMERA INITIALIZATION
@@ -191,74 +318,72 @@ static esp_err_t process_frame(vision_result_t *result)
     result->centroid_y = 0;
     result->contour_area = 0;
 
-    // =========================================================================
-    // TODO: OpenCV Processing Pipeline
-    // =========================================================================
-    //
-    // The following pseudocode outlines the vision processing steps.
-    // Implementation requires the esp32-opencv component to be installed.
-    //
-    // CRITICAL: Use C-style OpenCV macros (CV_*), not C++ constants (cv::*)
-    //
-    // Step 2: Create zero-copy wrapper for RGB565 data
-    // cv::Mat rgb565_mat(fb->height, fb->width, CV_8UC2, fb->buf);
-    //
-    // Step 3: Convert RGB565 -> BGR888
-    // cv::Mat bgr_mat(fb->height, fb->width, CV_8UC3);
-    // cv::cvtColor(rgb565_mat, bgr_mat, CV_RGB5652BGR);
-    //
-    // Step 4: Convert BGR888 -> HSV
-    // cv::Mat hsv_mat(fb->height, fb->width, CV_8UC3);
-    // cv::cvtColor(bgr_mat, hsv_mat, CV_BGR2HSV);
-    //
-    // Step 5: Threshold for green color
-    // cv::Scalar lower_green(HSV_GREEN_H_MIN, HSV_GREEN_S_MIN, HSV_GREEN_V_MIN);
-    // cv::Scalar upper_green(HSV_GREEN_H_MAX, HSV_GREEN_S_MAX, HSV_GREEN_V_MAX);
-    // cv::Mat mask(fb->height, fb->width, CV_8UC1);
-    // cv::inRange(hsv_mat, lower_green, upper_green, mask);
-    //
-    // Step 6: Morphological filtering (remove noise)
-    // cv::Mat kernel = cv::getStructuringElement(CV_SHAPE_RECT,
-    //                                            cv::Size(MORPH_KERNEL_SIZE, MORPH_KERNEL_SIZE));
-    // cv::morphologyEx(mask, mask, CV_MOP_OPEN, kernel);  // Erosion + Dilation
-    // cv::morphologyEx(mask, mask, CV_MOP_CLOSE, kernel); // Dilation + Erosion
-    //
-    // Step 7: Find contours
-    // std::vector<std::vector<cv::Point>> contours;
-    // cv::findContours(mask, contours, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE);
-    //
-    // Step 8: Find largest valid contour
-    // int max_area = 0;
-    // int max_contour_idx = -1;
-    // int image_area = fb->width * fb->height;
-    // for (size_t i = 0; i < contours.size(); i++) {
-    //     int area = cv::contourArea(contours[i]);
-    //     if (area > MIN_CONTOUR_AREA &&
-    //         area < image_area * MAX_CONTOUR_AREA_RATIO &&
-    //         area > max_area) {
-    //         max_area = area;
-    //         max_contour_idx = i;
-    //     }
-    // }
-    //
-    // Step 9: Calculate distance if obstacle found
-    // if (max_contour_idx >= 0) {
-    //     cv::Rect bbox = cv::boundingRect(contours[max_contour_idx]);
-    //     result->obstacle_detected = true;
-    //     result->centroid_x = bbox.x + bbox.width / 2;
-    //     result->centroid_y = bbox.y + bbox.height / 2;
-    //     result->contour_area = max_area;
-    //     result->distance_cm = estimate_distance(bbox.width);
-    //
-    //     ESP_LOGI(TAG, "GREEN obstacle detected: distance=%.1f cm, pos=(%d,%d), area=%d px",
-    //              result->distance_cm, result->centroid_x, result->centroid_y, max_area);
-    // }
-    // =========================================================================
+    const uint16_t *pixels = (const uint16_t *)fb->buf;
+    uint32_t sum_x = 0;
+    uint32_t sum_y = 0;
+    uint32_t hit_count = 0;
+    int min_x = fb->width;
+    int max_x = -1;
+    int min_y = fb->height;
+    int max_y = -1;
 
-    // TEMPORARY: Simulated detection for testing (remove when OpenCV is integrated)
-    ESP_LOGW(TAG, "OpenCV processing not yet implemented - using dummy data");
-    result->obstacle_detected = false; // No detection until OpenCV is added
-    result->distance_cm = 999.9f;
+    for (int y = 0; y < fb->height; y++)
+    {
+        const uint16_t *row = pixels + (y * fb->width);
+        for (int x = 0; x < fb->width; x++)
+        {
+            uint8_t h, s, v;
+            rgb565_to_hsv_fast(row[x], &h, &s, &v);
+
+            if (!hsv_in_range(h, s, v, &kGreenRange))
+            {
+                continue;
+            }
+
+            sum_x += x;
+            sum_y += y;
+            hit_count++;
+
+            if (x < min_x)
+                min_x = x;
+            if (x > max_x)
+                max_x = x;
+            if (y < min_y)
+                min_y = y;
+            if (y > max_y)
+                max_y = y;
+        }
+    }
+
+    const int image_area = fb->width * fb->height;
+    const int max_allowed_area = (int)(image_area * MAX_CONTOUR_AREA_RATIO);
+
+    if (hit_count >= MIN_CONTOUR_AREA && hit_count < (uint32_t)max_allowed_area && max_x >= 0)
+    {
+        result->obstacle_detected = true;
+        result->centroid_x = sum_x / hit_count;
+        result->centroid_y = sum_y / hit_count;
+        result->contour_area = hit_count;
+
+        int bbox_width = (max_x - min_x) + 1;
+        result->distance_cm = estimate_distance(bbox_width);
+
+        ESP_LOGI(TAG, "Obstáculo verde: %.1f cm @ (%d,%d) area=%d",
+                 result->distance_cm, result->centroid_x, result->centroid_y, result->contour_area);
+    }
+    else
+    {
+        result->obstacle_detected = false;
+        result->distance_cm = 999.9f;
+    }
+
+    uint32_t frame_index = ++s_frame_counter;
+    result->frame_count = frame_index;
+
+    if ((frame_index % STREAM_FRAME_INTERVAL) == 0)
+    {
+        stream_frame_over_ws(fb);
+    }
 
     // Return frame buffer to driver
     esp_camera_fb_return(fb);
@@ -266,7 +391,10 @@ static esp_err_t process_frame(vision_result_t *result)
     // Calculate processing time
     uint64_t end_time = esp_timer_get_time();
     result->processing_time_ms = (end_time - start_time) / 1000;
-    result->frame_count = ++s_frame_counter;
+    if (result->frame_count == 0)
+    {
+        result->frame_count = ++s_frame_counter;
+    }
 
     ESP_LOGD(TAG, "Frame processed in %u ms", result->processing_time_ms);
 
