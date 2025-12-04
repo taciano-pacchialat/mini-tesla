@@ -10,10 +10,389 @@
 static const char *TAG = "WebSocket";
 static httpd_handle_t server = NULL;
 
-// Lista de file descriptors de clientes WebSocket conectados
+// Gestión de clientes WebSocket (dashboard y vehículos)
 #define MAX_WS_CLIENTS 4
-static int ws_client_fds[MAX_WS_CLIENTS] = {-1, -1, -1, -1};
+
+typedef enum
+{
+    WS_ROLE_UNKNOWN = 0,
+    WS_ROLE_DASHBOARD,
+    WS_ROLE_VEHICLE,
+} ws_role_t;
+
+typedef struct
+{
+    int fd;
+    ws_role_t role;
+    char vehicle_id[32];
+} ws_client_t;
+
+static ws_client_t ws_clients[MAX_WS_CLIENTS] = {
+    {.fd = -1, .role = WS_ROLE_UNKNOWN, .vehicle_id = ""},
+    {.fd = -1, .role = WS_ROLE_UNKNOWN, .vehicle_id = ""},
+    {.fd = -1, .role = WS_ROLE_UNKNOWN, .vehicle_id = ""},
+    {.fd = -1, .role = WS_ROLE_UNKNOWN, .vehicle_id = ""},
+};
 static uint8_t ws_clients_count = 0;
+static uint8_t ws_dashboard_count = 0;
+
+static void ws_remove_client(int fd);
+static void ws_update_stream_status_for_vehicles(void);
+static esp_err_t ws_queue_frame(int fd,
+                                httpd_ws_type_t type,
+                                const uint8_t *data,
+                                size_t len);
+
+static ws_client_t *ws_find_client(int fd)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == fd)
+        {
+            return &ws_clients[i];
+        }
+    }
+    return NULL;
+}
+
+static ws_client_t *ws_find_vehicle_by_id(const char *vehicle_id)
+{
+    if (!vehicle_id || vehicle_id[0] == '\0')
+    {
+        return NULL;
+    }
+
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == -1 || ws_clients[i].role != WS_ROLE_VEHICLE)
+        {
+            continue;
+        }
+
+        if (strncmp(ws_clients[i].vehicle_id, vehicle_id, sizeof(ws_clients[i].vehicle_id)) == 0)
+        {
+            return &ws_clients[i];
+        }
+    }
+    return NULL;
+}
+
+static ws_client_t *ws_first_vehicle(void)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd != -1 && ws_clients[i].role == WS_ROLE_VEHICLE)
+        {
+            return &ws_clients[i];
+        }
+    }
+    return NULL;
+}
+
+static void ws_set_client_role(ws_client_t *client,
+                               ws_role_t role,
+                               const char *vehicle_id)
+{
+    if (!client)
+    {
+        return;
+    }
+
+    ws_role_t previous_role = client->role;
+
+    if (client->role == WS_ROLE_DASHBOARD && role != WS_ROLE_DASHBOARD && ws_dashboard_count > 0)
+    {
+        ws_dashboard_count--;
+    }
+
+    client->role = role;
+
+    if (role == WS_ROLE_DASHBOARD)
+    {
+        ws_dashboard_count++;
+    }
+
+    if (role == WS_ROLE_VEHICLE && vehicle_id)
+    {
+        strncpy(client->vehicle_id, vehicle_id, sizeof(client->vehicle_id) - 1);
+        client->vehicle_id[sizeof(client->vehicle_id) - 1] = '\0';
+    }
+    else if (role != WS_ROLE_VEHICLE)
+    {
+        client->vehicle_id[0] = '\0';
+    }
+
+    if ((previous_role != role) &&
+        (previous_role == WS_ROLE_DASHBOARD || role == WS_ROLE_DASHBOARD))
+    {
+        ws_update_stream_status_for_vehicles();
+    }
+}
+
+static esp_err_t ws_send_vehicle_list_to_client(const ws_client_t *dashboard)
+{
+    if (!dashboard || dashboard->fd < 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "type", "vehicle_list");
+    cJSON *list = cJSON_AddArrayToObject(root, "vehicles");
+    if (!list)
+    {
+        cJSON_Delete(root);
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == -1 || ws_clients[i].role != WS_ROLE_VEHICLE)
+        {
+            continue;
+        }
+
+        if (ws_clients[i].vehicle_id[0] != '\0')
+        {
+            cJSON_AddItemToArray(list, cJSON_CreateString(ws_clients[i].vehicle_id));
+        }
+    }
+
+    char *json = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = ws_queue_frame(dashboard->fd,
+                                   HTTPD_WS_TYPE_TEXT,
+                                   (const uint8_t *)json,
+                                   strlen(json));
+    free(json);
+    return ret;
+}
+
+static void ws_broadcast_vehicle_list(void)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == -1 || ws_clients[i].role != WS_ROLE_DASHBOARD)
+        {
+            continue;
+        }
+
+        if (ws_send_vehicle_list_to_client(&ws_clients[i]) != ESP_OK)
+        {
+            ws_remove_client(ws_clients[i].fd);
+        }
+    }
+}
+
+static esp_err_t ws_send_stream_status_to_vehicle(const ws_client_t *vehicle)
+{
+    if (!vehicle || vehicle->fd < 0)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "type", "stream_status");
+    cJSON_AddBoolToObject(root, "enable", ws_dashboard_count > 0);
+    cJSON_AddNumberToObject(root, "viewer_count", ws_dashboard_count);
+
+    char *json_string = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json_string)
+    {
+        ESP_LOGE(TAG, "Error creando JSON para estado de stream");
+        return ESP_FAIL;
+    }
+
+    esp_err_t ret = ws_queue_frame(vehicle->fd,
+                                   HTTPD_WS_TYPE_TEXT,
+                                   (const uint8_t *)json_string,
+                                   strlen(json_string));
+    free(json_string);
+
+    return ret;
+}
+
+static void ws_update_stream_status_for_vehicles(void)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == -1 || ws_clients[i].role != WS_ROLE_VEHICLE)
+        {
+            continue;
+        }
+
+        if (ws_send_stream_status_to_vehicle(&ws_clients[i]) != ESP_OK)
+        {
+            ws_remove_client(ws_clients[i].fd);
+        }
+    }
+}
+
+static bool ws_client_exists(int fd)
+{
+    return ws_find_client(fd) != NULL;
+}
+
+static void ws_add_client(int fd)
+{
+    for (int i = 0; i < MAX_WS_CLIENTS; i++)
+    {
+        if (ws_clients[i].fd == -1)
+        {
+            ws_clients[i].fd = fd;
+            ws_clients[i].role = WS_ROLE_UNKNOWN;
+            ws_clients[i].vehicle_id[0] = '\0';
+            ws_clients_count++;
+            ESP_LOGI(TAG, "Cliente WebSocket agregado, fd=%d, total=%d", fd, ws_clients_count);
+            return;
+        }
+    }
+    ESP_LOGW(TAG, "No hay espacio para más clientes WebSocket");
+}
+
+static esp_err_t ws_forward_control_message(const cJSON *root,
+                                            ws_client_t *source_client)
+{
+    if (!root)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const cJSON *vehicle_id_item = cJSON_GetObjectItem(root, "vehicle_id");
+    const char *vehicle_id = (vehicle_id_item && cJSON_IsString(vehicle_id_item)) ? vehicle_id_item->valuestring : NULL;
+
+    ws_client_t *target = ws_find_vehicle_by_id(vehicle_id);
+    if (!target)
+    {
+        target = ws_first_vehicle();
+    }
+
+    if (!target)
+    {
+        ESP_LOGW(TAG, "No hay vehículos conectados para reenviar comando");
+        return ESP_FAIL;
+    }
+
+    if (source_client && target->fd == source_client->fd)
+    {
+        ESP_LOGW(TAG, "Ignorando comando porque el origen es el mismo vehículo");
+        return ESP_FAIL;
+    }
+
+    char *json_string = cJSON_PrintUnformatted(root);
+    if (!json_string)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    esp_err_t ret = ws_queue_frame(target->fd,
+                                   HTTPD_WS_TYPE_TEXT,
+                                   (const uint8_t *)json_string,
+                                   strlen(json_string));
+
+    if (ret != ESP_OK)
+    {
+        ESP_LOGE(TAG, "Error reenviando comando a fd=%d: %s",
+                 target->fd,
+                 esp_err_to_name(ret));
+        ws_remove_client(target->fd);
+    }
+
+    free(json_string);
+    return ret;
+}
+
+static void ws_handle_text_message(int fd, const char *payload)
+{
+    if (!payload)
+    {
+        return;
+    }
+
+    ws_client_t *client = ws_find_client(fd);
+    if (!client)
+    {
+        ws_add_client(fd);
+        client = ws_find_client(fd);
+    }
+
+    cJSON *root = cJSON_Parse(payload);
+    if (!root)
+    {
+        ESP_LOGW(TAG, "JSON inválido recibido de fd=%d", fd);
+        return;
+    }
+
+    const cJSON *type_item = cJSON_GetObjectItem(root, "type");
+    const char *type = (type_item && cJSON_IsString(type_item)) ? type_item->valuestring : NULL;
+
+    if (!type)
+    {
+        ESP_LOGD(TAG, "Mensaje sin tipo desde fd=%d", fd);
+        cJSON_Delete(root);
+        return;
+    }
+
+    if (strcmp(type, "register") == 0)
+    {
+        const cJSON *role_item = cJSON_GetObjectItem(root, "role");
+        const char *role = (role_item && cJSON_IsString(role_item)) ? role_item->valuestring : NULL;
+        const cJSON *vehicle_item = cJSON_GetObjectItem(root, "vehicle_id");
+        const char *vehicle_id = (vehicle_item && cJSON_IsString(vehicle_item)) ? vehicle_item->valuestring : NULL;
+
+        if (role && strcmp(role, "vehicle") == 0)
+        {
+            ws_set_client_role(client, WS_ROLE_VEHICLE, vehicle_id ? vehicle_id : "");
+            ESP_LOGI(TAG, "Vehículo registrado: fd=%d, id=%s",
+                     fd,
+                     vehicle_id ? vehicle_id : "(sin id)");
+            ws_broadcast_vehicle_list();
+            ws_send_stream_status_to_vehicle(client);
+        }
+        else
+        {
+            ws_set_client_role(client, WS_ROLE_DASHBOARD, NULL);
+            ESP_LOGI(TAG, "Dashboard registrado: fd=%d", fd);
+            ws_send_vehicle_list_to_client(client);
+        }
+    }
+    else if (strcmp(type, "control") == 0)
+    {
+        if (client && client->role == WS_ROLE_VEHICLE)
+        {
+            ESP_LOGW(TAG, "Vehículo envió comando de control - ignorado");
+        }
+        else
+        {
+            ws_set_client_role(client, WS_ROLE_DASHBOARD, NULL);
+            ws_forward_control_message(root, client);
+        }
+    }
+    else
+    {
+        ESP_LOGD(TAG, "Mensaje ignorado (%s) desde fd=%d", type, fd);
+    }
+
+    cJSON_Delete(root);
+}
 
 typedef struct
 {
@@ -100,50 +479,39 @@ static esp_err_t broadcast_video_frame(frame_source_t source,
                                        size_t jpeg_len,
                                        int exclude_fd);
 
-static bool ws_client_exists(int fd)
-{
-    for (int i = 0; i < MAX_WS_CLIENTS; i++)
-    {
-        if (ws_client_fds[i] == fd)
-        {
-            return true;
-        }
-    }
-    return false;
-}
-
-/**
- * @brief Agrega un cliente WebSocket a la lista
- */
-static void ws_add_client(int fd)
-{
-    for (int i = 0; i < MAX_WS_CLIENTS; i++)
-    {
-        if (ws_client_fds[i] == -1)
-        {
-            ws_client_fds[i] = fd;
-            ws_clients_count++;
-            ESP_LOGI(TAG, "Cliente WebSocket agregado, fd=%d, total=%d", fd, ws_clients_count);
-            return;
-        }
-    }
-    ESP_LOGW(TAG, "No hay espacio para más clientes WebSocket");
-}
-
-/**
- * @brief Remueve un cliente WebSocket de la lista
- */
 static void ws_remove_client(int fd)
 {
     for (int i = 0; i < MAX_WS_CLIENTS; i++)
     {
-        if (ws_client_fds[i] == fd)
+        if (ws_clients[i].fd != fd)
         {
-            ws_client_fds[i] = -1;
-            ws_clients_count--;
-            ESP_LOGI(TAG, "Cliente WebSocket removido, fd=%d, total=%d", fd, ws_clients_count);
-            return;
+            continue;
         }
+
+        bool was_vehicle = (ws_clients[i].role == WS_ROLE_VEHICLE && ws_clients[i].vehicle_id[0] != '\0');
+        bool was_dashboard = (ws_clients[i].role == WS_ROLE_DASHBOARD);
+
+        if (was_dashboard && ws_dashboard_count > 0)
+        {
+            ws_dashboard_count--;
+            ws_update_stream_status_for_vehicles();
+        }
+
+        ws_clients[i].fd = -1;
+        ws_clients[i].role = WS_ROLE_UNKNOWN;
+        ws_clients[i].vehicle_id[0] = '\0';
+        if (ws_clients_count > 0)
+        {
+            ws_clients_count--;
+        }
+
+        ESP_LOGI(TAG, "Cliente WebSocket removido, fd=%d, total=%d", fd, ws_clients_count);
+
+        if (was_vehicle)
+        {
+            ws_broadcast_vehicle_list();
+        }
+        return;
     }
 }
 
@@ -151,116 +519,232 @@ static void ws_remove_client(int fd)
  * @brief Manejador de página web principal
  */
 static const char *index_html =
-    "<!DOCTYPE html>"
-    "<html>"
-    "<head>"
-    "<title>ESP32-S3 Vision System</title>"
-    "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-    "<style>"
-    "body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #101010; color: #fefefe; }"
-    ".container { max-width: 1280px; margin: 0 auto; }"
-    ".header { text-align: center; margin-bottom: 20px; }"
-    ".status { padding: 10px; border-radius: 6px; text-align: center; margin-bottom: 20px; font-weight: bold; }"
-    ".status.connected { background: #0a4; }"
-    ".status.disconnected { background: #a40; }"
-    ".video-grid { display: flex; flex-wrap: wrap; gap: 20px; }"
-    ".card { background: #1f1f1f; border-radius: 10px; padding: 15px; flex: 1 1 360px; box-shadow: 0 8px 20px rgba(0,0,0,0.3); }"
-    "canvas { width: 100%; height: auto; background: #000; border-radius: 6px; }"
-    ".fps { margin-top: 8px; font-size: 0.9rem; color: #9fe070; }"
-    ".telemetry { margin-top: 20px; background: #1b1b1b; border-radius: 10px; padding: 15px; }"
-    ".telemetry h3 { margin-top: 0; }"
-    ".telemetry-item { display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid #2b2b2b; }"
-    ".telemetry-item:last-child { border-bottom: none; }"
-    "@media (max-width: 768px) { .video-grid { flex-direction: column; } }"
-    "</style>"
-    "</head>"
-    "<body>"
-    "<div class='container'>"
-    "  <div class='header'><h1>🤖 ESP32 Vision Dashboard</h1><p>SoftAP: ESP32-Vision-Bot (192.168.4.1)</p></div>"
-    "  <div id='status' class='status disconnected'>WebSocket desconectado</div>"
-    "  <div class='video-grid'>"
-    "    <div class='card'>"
-    "      <h3>ESP32-S3 (Nodo maestro)</h3>"
-    "      <canvas id='canvasS3'></canvas>"
-    "      <div class='fps'>FPS: <span id='fpsS3'>0</span></div>"
-    "    </div>"
-    "    <div class='card'>"
-    "      <h3>ESP32-CAM (Vehículo)</h3>"
-    "      <canvas id='canvasCar'></canvas>"
-    "      <div class='fps'>FPS: <span id='fpsCar'>0</span></div>"
-    "    </div>"
-    "  </div>"
-    "  <div class='telemetry'>"
-    "    <h3>📊 Telemetría en Tiempo Real</h3>"
-    "    <div class='telemetry-item'><span>Objeto</span><span id='object'>-</span></div>"
-    "    <div class='telemetry-item'><span>Distancia</span><span><span id='distance'>-</span> cm</span></div>"
-    "    <div class='telemetry-item'><span>Píxel</span><span>(<span id='pixelX'>-</span>, <span id='pixelY'>-</span>)</span></div>"
-    "    <div class='telemetry-item'><span>Mundo</span><span>(<span id='worldX'>-</span>, <span id='worldY'>-</span>) cm</span></div>"
-    "    <div class='telemetry-item'><span>Píxeles detectados</span><span id='pixels'>-</span></div>"
-    "  </div>"
-    "</div>"
-    "<script>"
-    "const canvases = { esp32s3: document.getElementById('canvasS3'), esp32cam: document.getElementById('canvasCar') };"
-    "const contexts = { esp32s3: canvases.esp32s3.getContext('2d'), esp32cam: canvases.esp32cam.getContext('2d') };"
-    "const statusEl = document.getElementById('status');"
-    "const fpsLabels = { esp32s3: document.getElementById('fpsS3'), esp32cam: document.getElementById('fpsCar') };"
-    "const fpsCounters = { esp32s3: {count: 0, last: Date.now()}, esp32cam: {count: 0, last: Date.now()} };"
-    "let ws;"
-    "let pendingFrameSource = 'esp32s3';"
-    "function updateFps(source) {"
-    "  const stats = fpsCounters[source];"
-    "  stats.count++;"
-    "  const now = Date.now();"
-    "  if (now - stats.last >= 1000) {"
-    "    fpsLabels[source].textContent = stats.count;"
-    "    stats.count = 0;"
-    "    stats.last = now;"
-    "  }"
-    "}"
-    "function drawFrame(source, buffer) {"
-    "  const blob = new Blob([buffer], {type: 'image/jpeg'});"
-    "  const url = URL.createObjectURL(blob);"
-    "  const img = new Image();"
-    "  img.onload = () => {"
-    "    const canvas = canvases[source];"
-    "    const ctx = contexts[source];"
-    "    canvas.width = img.width;"
-    "    canvas.height = img.height;"
-    "    ctx.drawImage(img, 0, 0);"
-    "    URL.revokeObjectURL(url);"
-    "    updateFps(source);"
-    "  };"
-    "  img.src = url;"
-    "}"
-    "function connect() {"
-    "  ws = new WebSocket('ws://' + window.location.hostname + '/ws');"
-    "  ws.binaryType = 'arraybuffer';"
-    "  ws.onopen = () => { statusEl.textContent = 'WebSocket conectado'; statusEl.className = 'status connected'; };"
-    "  ws.onclose = () => { statusEl.textContent = 'WebSocket desconectado'; statusEl.className = 'status disconnected'; setTimeout(connect, 3000); };"
-    "  ws.onerror = (e) => console.error('WebSocket error', e);"
-    "  ws.onmessage = (e) => {"
-    "    if (typeof e.data === 'string') {"
-    "      const data = JSON.parse(e.data);"
-    "      if (data.type === 'frame') {"
-    "        pendingFrameSource = data.source || 'esp32s3';"
-    "        return;"
-    "      }"
-    "      document.getElementById('object').textContent = data.detected ? data.object_type : 'No detectado';"
-    "      document.getElementById('distance').textContent = data.detected ? data.distance_cm.toFixed(1) : '-';"
-    "      document.getElementById('pixelX').textContent = data.detected ? data.pixel_x : '-';"
-    "      document.getElementById('pixelY').textContent = data.detected ? data.pixel_y : '-';"
-    "      document.getElementById('worldX').textContent = data.detected ? data.world_x.toFixed(1) : '-';"
-    "      document.getElementById('worldY').textContent = data.detected ? data.world_y.toFixed(1) : '-';"
-    "      document.getElementById('pixels').textContent = data.detected ? data.pixel_count : '-';"
-    "    } else {"
-    "      drawFrame(pendingFrameSource, e.data);"
-    "    }"
-    "  };"
-    "}"
-    "connect();"
-    "</script>"
-    "</body>"
-    "</html>";
+    "<!DOCTYPE html>\n"
+    "<html>\n"
+    "<head>\n"
+    "<title>ESP32 Vision Control</title>\n"
+    "<meta name='viewport' content='width=device-width, initial-scale=1'>\n"
+    "<style>\n"
+    "body { font-family: 'Space Grotesk', 'Segoe UI', sans-serif; margin: 0; padding: 24px; background: radial-gradient(circle at top,#0f1f3d,#050910 70%); color: #f7fafc; }\n"
+    ".container { max-width: 1280px; margin: 0 auto; }\n"
+    ".header { text-align: center; margin-bottom: 24px; }\n"
+    ".status { padding: 12px; border-radius: 999px; text-align: center; margin-bottom: 24px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }\n"
+    ".status.connected { background: rgba(88,225,193,0.12); color: #58e1c1; border: 1px solid rgba(88,225,193,0.4); }\n"
+    ".status.disconnected { background: rgba(242,95,92,0.12); color: #f25f5c; border: 1px solid rgba(242,95,92,0.4); }\n"
+    ".video-grid { display: flex; flex-wrap: wrap; gap: 20px; }\n"
+    ".card { background: rgba(16,25,45,0.92); border-radius: 16px; padding: 18px; flex: 1 1 360px; box-shadow: 0 25px 60px rgba(2,6,23,0.6); border: 1px solid rgba(255,255,255,0.04); backdrop-filter: blur(6px); }\n"
+    ".card h3 { margin: 0 0 10px; letter-spacing: 0.05em; }\n"
+    "canvas { width: 100%; height: auto; background: #000; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); }\n"
+    ".fps { margin-top: 8px; font-size: 0.85rem; color: #58e1c1; letter-spacing: 0.05em; }\n"
+    ".control-panel { margin-top: 24px; background: rgba(16,25,45,0.92); border-radius: 16px; padding: 18px; box-shadow: 0 25px 60px rgba(2,6,23,0.5); border: 1px solid rgba(255,255,255,0.04); }\n"
+    ".control-panel h3 { margin-top: 0; letter-spacing: 0.08em; text-transform: uppercase; font-size: 0.95rem; color: #9fabc7; }\n"
+    ".control-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 120px)); gap: 12px; justify-content: center; margin-top: 10px; }\n"
+    ".control-btn { background: #0c1426; border: 1px solid rgba(88,225,193,0.3); color: #f7fafc; font-size: 1rem; font-weight: 600; padding: 14px 10px; border-radius: 12px; text-transform: uppercase; letter-spacing: 0.08em; cursor: pointer; transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease; }\n"
+    ".control-btn:disabled { opacity: 0.3; cursor: not-allowed; }\n"
+    ".control-btn.active, .control-btn:focus-visible { border-color: #58e1c1; background: rgba(88,225,193,0.18); outline: none; transform: translateY(-2px); }\n"
+    ".control-btn.secondary { border-color: rgba(247,250,252,0.2); color: #9fabc7; }\n"
+    ".control-helper { margin-top: 12px; font-size: 0.85rem; color: #9fabc7; text-align: center; letter-spacing: 0.05em; }\n"
+    "label { display: block; font-size: 0.85rem; color: #9fabc7; letter-spacing: 0.05em; margin-bottom: 6px; }\n"
+    "select { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.08); background: rgba(8,14,26,0.8); color: #f7fafc; font-size: 0.95rem; }\n"
+    "@media (max-width: 768px) { .video-grid { flex-direction: column; } .control-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }\n"
+    "</style>\n"
+    "</head>\n"
+    "<body>\n"
+    "<div class='container'>\n"
+    "  <div class='header'><h1>ESP32 Vision Dashboard</h1><p>SoftAP: ESP32-Vision-Bot (192.168.4.1)</p></div>\n"
+    "  <div id='status' class='status disconnected'>WebSocket desconectado</div>\n"
+    "  <div class='video-grid'>\n"
+    "    <div class='card'>\n"
+    "      <h3>ESP32-S3 (Nodo maestro)</h3>\n"
+    "      <canvas id='canvasS3'></canvas>\n"
+    "      <div class='fps'>FPS: <span id='fpsS3'>0</span></div>\n"
+    "    </div>\n"
+    "    <div class='card'>\n"
+    "      <h3>ESP32-CAM (Vehiculo)</h3>\n"
+    "      <canvas id='canvasCar'></canvas>\n"
+    "      <div class='fps'>FPS: <span id='fpsCar'>0</span></div>\n"
+    "    </div>\n"
+    "  </div>\n"
+    "  <div class='control-panel'>\n"
+    "    <h3>Control Manual del Vehículo</h3>\n"
+    "    <label for='vehicleSelect'>Vehiculo conectado</label>\n"
+    "    <select id='vehicleSelect'></select>\n"
+    "    <div class='control-grid'>\n"
+    "      <div></div>\n"
+    "      <button class='control-btn' data-control='forward'>Adelante</button>\n"
+    "      <div></div>\n"
+    "      <button class='control-btn' data-control='left'>Izquierda</button>\n"
+    "      <button class='control-btn secondary' data-control='stop'>Stop</button>\n"
+    "      <button class='control-btn' data-control='right'>Derecha</button>\n"
+    "      <div></div>\n"
+    "      <button class='control-btn' data-control='backward'>Atras</button>\n"
+    "      <div></div>\n"
+    "    </div>\n"
+    "    <div class='control-helper'>Manten presionado para avanzar; suelta para frenar. Tambien puedes usar WASD o las flechas.</div>\n"
+    "  </div>\n"
+    "</div>\n"
+    "<script>\n"
+    "const canvases = { esp32s3: document.getElementById('canvasS3'), esp32cam: document.getElementById('canvasCar') };\n"
+    "const contexts = { esp32s3: canvases.esp32s3.getContext('2d'), esp32cam: canvases.esp32cam.getContext('2d') };\n"
+    "const statusEl = document.getElementById('status');\n"
+    "const fpsLabels = { esp32s3: document.getElementById('fpsS3'), esp32cam: document.getElementById('fpsCar') };\n"
+    "const fpsCounters = { esp32s3: {count: 0, last: Date.now()}, esp32cam: {count: 0, last: Date.now()} };\n"
+    "const controlButtons = document.querySelectorAll('.control-btn');\n"
+    "const vehicleSelect = document.getElementById('vehicleSelect');\n"
+    "const commandIntervals = new Map();\n"
+    "const keyboardMap = { ArrowUp: 'forward', KeyW: 'forward', ArrowDown: 'backward', KeyS: 'backward', ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', Space: 'stop' };\n"
+    "const pressedKeys = new Set();\n"
+    "let ws;\n"
+    "let pendingFrameSource = 'esp32s3';\n"
+    "let selectedVehicleId = null;\n"
+    "\n"
+    "function setControlsEnabled(enabled) {\n"
+    "  controlButtons.forEach(btn => {\n"
+    "    btn.disabled = !enabled;\n"
+    "    if (!enabled) { btn.classList.remove('active'); }\n"
+    "  });\n"
+    "  vehicleSelect.disabled = !enabled;\n"
+    "  if (!enabled) {\n"
+    "    commandIntervals.forEach(interval => clearInterval(interval));\n"
+    "    commandIntervals.clear();\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "function updateVehicleOptions(list = []) {\n"
+    "  vehicleSelect.innerHTML = '';\n"
+    "  list.forEach(id => {\n"
+    "    const option = document.createElement('option');\n"
+    "    option.value = id;\n"
+    "    option.textContent = id;\n"
+    "    vehicleSelect.appendChild(option);\n"
+    "  });\n"
+    "  selectedVehicleId = list.length ? list[0] : null;\n"
+    "  setControlsEnabled(!!selectedVehicleId && ws && ws.readyState === WebSocket.OPEN);\n"
+    "}\n"
+    "\n"
+    "vehicleSelect.addEventListener('change', () => {\n"
+    "  selectedVehicleId = vehicleSelect.value || null;\n"
+    "});\n"
+    "\n"
+    "function sendControl(command) {\n"
+    "  if (!ws || ws.readyState !== WebSocket.OPEN || !selectedVehicleId) { return; }\n"
+    "  const payload = { type: 'control', command, vehicle_id: selectedVehicleId, timestamp: Date.now() };\n"
+    "  ws.send(JSON.stringify(payload));\n"
+    "}\n"
+    "\n"
+    "function attachControlHandlers() {\n"
+    "  controlButtons.forEach(btn => {\n"
+    "    const command = btn.dataset.control;\n"
+    "    const start = (event) => {\n"
+    "      event.preventDefault();\n"
+    "      if (btn.disabled) { return; }\n"
+    "      btn.classList.add('active');\n"
+    "      sendControl(command);\n"
+    "      const interval = setInterval(() => sendControl(command), 350);\n"
+    "      commandIntervals.set(btn, interval);\n"
+    "    };\n"
+    "    const stop = () => {\n"
+    "      btn.classList.remove('active');\n"
+    "      const interval = commandIntervals.get(btn);\n"
+    "      if (interval) { clearInterval(interval); commandIntervals.delete(btn); }\n"
+    "      if (command !== 'stop') { sendControl('stop'); }\n"
+    "    };\n"
+    "    btn.addEventListener('pointerdown', start);\n"
+    "    btn.addEventListener('pointerup', stop);\n"
+    "    btn.addEventListener('pointerleave', stop);\n"
+    "    btn.addEventListener('pointercancel', stop);\n"
+    "  });\n"
+    "}\n"
+    "\n"
+    "attachControlHandlers();\n"
+    "setControlsEnabled(false);\n"
+    "\n"
+    "function updateFps(source) {\n"
+    "  const stats = fpsCounters[source];\n"
+    "  stats.count++;\n"
+    "  const now = Date.now();\n"
+    "  if (now - stats.last >= 1000) {\n"
+    "    fpsLabels[source].textContent = stats.count;\n"
+    "    stats.count = 0;\n"
+    "    stats.last = now;\n"
+    "  }\n"
+    "}\n"
+    "\n"
+    "function drawFrame(source, buffer) {\n"
+    "  const blob = new Blob([buffer], {type: 'image/jpeg'});\n"
+    "  const url = URL.createObjectURL(blob);\n"
+    "  const img = new Image();\n"
+    "  img.onload = () => {\n"
+    "    const canvas = canvases[source];\n"
+    "    const ctx = contexts[source];\n"
+    "    canvas.width = img.width;\n"
+    "    canvas.height = img.height;\n"
+    "    ctx.drawImage(img, 0, 0);\n"
+    "    URL.revokeObjectURL(url);\n"
+    "    updateFps(source);\n"
+    "  };\n"
+    "  img.src = url;\n"
+    "}\n"
+    "\n"
+    "function connect() {\n"
+    "  ws = new WebSocket('ws://' + window.location.hostname + '/ws');\n"
+    "  ws.binaryType = 'arraybuffer';\n"
+    "  ws.onopen = () => {\n"
+    "    statusEl.textContent = 'WebSocket conectado';\n"
+    "    statusEl.className = 'status connected';\n"
+    "    ws.send(JSON.stringify({ type: 'register', role: 'dashboard' }));\n"
+    "  };\n"
+    "  ws.onclose = () => {\n"
+    "    statusEl.textContent = 'WebSocket desconectado';\n"
+    "    statusEl.className = 'status disconnected';\n"
+    "    updateVehicleOptions([]);\n"
+    "    setTimeout(connect, 2000);\n"
+    "  };\n"
+    "  ws.onerror = (e) => console.error('WebSocket error', e);\n"
+    "  ws.onmessage = (e) => {\n"
+    "    if (typeof e.data === 'string') {\n"
+    "      const data = JSON.parse(e.data);\n"
+    "      if (data.type === 'frame') {\n"
+    "        pendingFrameSource = data.source || 'esp32s3';\n"
+    "        return;\n"
+    "      }\n"
+    "      if (data.type === 'vehicle_list') {\n"
+    "        updateVehicleOptions(data.vehicles || []);\n"
+    "        return;\n"
+    "      }\n"
+    "      return;\n"
+    "    }\n"
+    "    drawFrame(pendingFrameSource, e.data);\n"
+    "  };\n"
+    "}\n"
+    "\n"
+    "connect();\n"
+    "\n"
+    "document.addEventListener('keydown', (event) => {\n"
+    "  const command = keyboardMap[event.code];\n"
+    "  if (!command || pressedKeys.has(event.code)) { return; }\n"
+    "  pressedKeys.add(event.code);\n"
+    "  const button = [...controlButtons].find(btn => btn.dataset.control === command);\n"
+    "  if (button && !button.disabled) { button.classList.add('active'); }\n"
+    "  sendControl(command);\n"
+    "});\n"
+    "\n"
+    "document.addEventListener('keyup', (event) => {\n"
+    "  if (!pressedKeys.has(event.code)) { return; }\n"
+    "  pressedKeys.delete(event.code);\n"
+    "  const active = [...controlButtons].filter(btn => btn.classList.contains('active') && btn.dataset.control !== 'stop');\n"
+    "  active.forEach(btn => btn.classList.remove('active'));\n"
+    "  sendControl('stop');\n"
+    "});\n"
+    "\n"
+    "window.addEventListener('blur', () => {\n"
+    "  pressedKeys.clear();\n"
+    "  sendControl('stop');\n"
+    "  controlButtons.forEach(btn => btn.classList.remove('active'));\n"
+    "});\n"
+    "</script>\n"
+    "</body>\n"
+    "</html>\n";
 
 static esp_err_t index_handler(httpd_req_t *req)
 {
@@ -342,7 +826,7 @@ static esp_err_t ws_handler(httpd_req_t *req)
     }
     else if (ws_pkt.type == HTTPD_WS_TYPE_TEXT && ws_pkt.payload)
     {
-        ESP_LOGD(TAG, "Frame de texto recibido de fd=%d: %s", fd, (char *)ws_pkt.payload);
+        ws_handle_text_message(fd, (char *)ws_pkt.payload);
     }
 
     if (ws_pkt.payload)
@@ -403,63 +887,15 @@ esp_err_t ws_server_stop(void)
         httpd_stop(server);
         server = NULL;
         ws_clients_count = 0;
+        ws_dashboard_count = 0;
         for (int i = 0; i < MAX_WS_CLIENTS; i++)
         {
-            ws_client_fds[i] = -1;
+            ws_clients[i].fd = -1;
+            ws_clients[i].role = WS_ROLE_UNKNOWN;
+            ws_clients[i].vehicle_id[0] = '\0';
         }
         ESP_LOGI(TAG, "Servidor WebSocket detenido");
     }
-    return ESP_OK;
-}
-
-esp_err_t ws_server_send_telemetry(const telemetry_data_t *telemetry)
-{
-    if (!server || ws_clients_count == 0)
-    {
-        return ESP_OK; // No hay clientes, no hacer nada
-    }
-
-    // Crear JSON con los datos de telemetría
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "object_type", telemetry->object_type);
-    cJSON_AddNumberToObject(root, "distance_cm", telemetry->distance_cm);
-    cJSON_AddNumberToObject(root, "angle_deg", telemetry->angle_deg);
-    cJSON_AddNumberToObject(root, "pixel_x", telemetry->pixel_x);
-    cJSON_AddNumberToObject(root, "pixel_y", telemetry->pixel_y);
-    cJSON_AddNumberToObject(root, "world_x", telemetry->world_x);
-    cJSON_AddNumberToObject(root, "world_y", telemetry->world_y);
-    cJSON_AddNumberToObject(root, "pixel_count", telemetry->pixel_count);
-    cJSON_AddBoolToObject(root, "detected", telemetry->detected);
-    cJSON_AddNumberToObject(root, "timestamp_ms", telemetry->timestamp_ms);
-
-    char *json_string = cJSON_PrintUnformatted(root);
-    cJSON_Delete(root);
-
-    if (!json_string)
-    {
-        ESP_LOGE(TAG, "Error creando JSON");
-        return ESP_FAIL;
-    }
-
-    size_t json_len = strlen(json_string);
-    for (int i = 0; i < MAX_WS_CLIENTS; i++)
-    {
-        if (ws_client_fds[i] == -1)
-        {
-            continue;
-        }
-
-        esp_err_t ret = ws_queue_frame(ws_client_fds[i],
-                                       HTTPD_WS_TYPE_TEXT,
-                                       (const uint8_t *)json_string,
-                                       json_len);
-        if (ret != ESP_OK)
-        {
-            ws_remove_client(ws_client_fds[i]);
-        }
-    }
-
-    free(json_string);
     return ESP_OK;
 }
 
@@ -468,9 +904,9 @@ static esp_err_t broadcast_video_frame(frame_source_t source,
                                        size_t jpeg_len,
                                        int exclude_fd)
 {
-    if (!server || ws_clients_count == 0 || !jpeg_data || jpeg_len == 0)
+    if (!server || !jpeg_data || jpeg_len == 0 || ws_dashboard_count == 0)
     {
-        return ESP_OK; // No hay clientes o datos inválidos
+        return ESP_OK;
     }
 
     const char *source_str = frame_source_to_string(source);
@@ -481,33 +917,33 @@ static esp_err_t broadcast_video_frame(frame_source_t source,
 
     for (int i = 0; i < MAX_WS_CLIENTS; i++)
     {
-        if (ws_client_fds[i] == -1)
+        if (ws_clients[i].fd == -1 || ws_clients[i].role != WS_ROLE_DASHBOARD)
         {
             continue;
         }
 
-        if (exclude_fd >= 0 && ws_client_fds[i] == exclude_fd)
+        if (exclude_fd >= 0 && ws_clients[i].fd == exclude_fd)
         {
             continue;
         }
 
-        esp_err_t ret = ws_queue_frame(ws_client_fds[i],
+        esp_err_t ret = ws_queue_frame(ws_clients[i].fd,
                                        HTTPD_WS_TYPE_TEXT,
                                        (const uint8_t *)meta,
                                        meta_len);
         if (ret != ESP_OK)
         {
-            ws_remove_client(ws_client_fds[i]);
+            ws_remove_client(ws_clients[i].fd);
             continue;
         }
 
-        ret = ws_queue_frame(ws_client_fds[i],
+        ret = ws_queue_frame(ws_clients[i].fd,
                              HTTPD_WS_TYPE_BINARY,
                              jpeg_data,
                              jpeg_len);
         if (ret != ESP_OK)
         {
-            ws_remove_client(ws_client_fds[i]);
+            ws_remove_client(ws_clients[i].fd);
         }
     }
 
@@ -528,5 +964,5 @@ uint8_t ws_server_get_clients_count(void)
 
 bool ws_server_has_clients(void)
 {
-    return ws_clients_count > 0;
+    return ws_dashboard_count > 0;
 }

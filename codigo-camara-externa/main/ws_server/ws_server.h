@@ -12,26 +12,10 @@ typedef enum {
 } frame_source_t;
 
 /**
- * @brief Estructura para datos de telemetría
- */
-typedef struct {
-    char object_type[32];    // Tipo de objeto detectado
-    float distance_cm;       // Distancia en centímetros
-    float angle_deg;         // Ángulo relativo al centro
-    int pixel_x;             // Coordenada X en píxeles
-    int pixel_y;             // Coordenada Y en píxeles
-    float world_x;           // Coordenada X en el mundo (cm)
-    float world_y;           // Coordenada Y en el mundo (cm)
-    uint32_t pixel_count;    // Cantidad de píxeles detectados
-    bool detected;           // Si hay objeto detectado
-    uint32_t timestamp_ms;   // Timestamp en milisegundos
-} telemetry_data_t;
-
-/**
  * @brief Inicializa el servidor WebSocket
  * 
  * Crea un servidor HTTP con soporte para WebSockets en el puerto 80.
- * Maneja tanto telemetría (JSON) como video streaming (JPEG binario).
+ * Maneja video streaming (JPEG binario) y control manual vía WebSocket.
  * 
  * @return ESP_OK si la inicialización fue exitosa
  */
@@ -43,17 +27,6 @@ esp_err_t ws_server_start(void);
  * @return ESP_OK si se detuvo correctamente
  */
 esp_err_t ws_server_stop(void);
-
-/**
- * @brief Envía datos de telemetría a todos los clientes conectados
- * 
- * Envía un mensaje JSON con los datos de detección.
- * Usa httpd_ws_send_frame_async para no bloquear.
- * 
- * @param telemetry Datos de telemetría a enviar
- * @return ESP_OK si se envió correctamente
- */
-esp_err_t ws_server_send_telemetry(const telemetry_data_t *telemetry);
 
 /**
  * @brief Envía un frame de video JPEG a todos los clientes

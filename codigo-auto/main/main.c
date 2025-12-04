@@ -1,16 +1,16 @@
 /**
  * @file main.c
- * @brief ESP32-CAM Autonomous Vehicle - Main Entry Point
+ * @brief ESP32-CAM Vehicle Client - Main Entry Point
  *
  * Architecture:
  * - Core 0: WiFi, WebSocket, Status Transmission
- * - Core 1: Vision Processing, Autonomous Control
+ * - Core 1: Vision Processing, Manual Control Loop
  *
  * Components:
  * - WiFi Station: Connects to ESP32-S3 SoftAP
- * - WebSocket Client: Bidirectional communication
+ * - WebSocket Client: Dashboard commands + video streaming
  * - Motor Control: MCPWM-based differential drive
- * - Autonomous Task: Reactive control logic with local veto
+ * - Manual Control Task: Applies dashboard commands with local veto
  * - Vision Engine: Local obstacle detection (green objects)
  */
 
@@ -33,7 +33,7 @@
 static const char *TAG = "[Main]";
 
 // FreeRTOS handles
-static QueueHandle_t telemetry_queue = NULL;
+static QueueHandle_t command_queue = NULL;
 static EventGroupHandle_t system_events = NULL;
 
 // Event bits
@@ -55,83 +55,78 @@ static EventGroupHandle_t system_events = NULL;
 #define BATTERY_VOLTAGE_DIVIDER 2.0f      // Adjust based on your circuit
 
 /**
- * @brief Telemetry callback - called when data arrives from WebSocket
+ * @brief Control callback - called when dashboard commands arrive
  */
-static void telemetry_received_callback(const telemetry_data_t *data)
+static void control_command_callback(const control_message_t *message)
 {
-    if (telemetry_queue != NULL)
+    if (!message || command_queue == NULL)
     {
-        // Send to control task queue (non-blocking)
-        if (xQueueSend(telemetry_queue, data, 0) != pdTRUE)
-        {
-            ESP_LOGW(TAG, "Telemetry queue full, dropping data");
-        }
+        return;
+    }
+
+    if (xQueueSend(command_queue, message, 0) != pdTRUE)
+    {
+        ESP_LOGW(TAG, "Control queue full, dropping command %s", message->raw_command);
     }
 }
 
 /**
- * @brief Task: Autonomous Control Loop with Vision Fusion
- * Runs on Core 1 (Application CPU)
- * Priority: 6 (High)
- *
- * Implements fusion logic:
- * - Reads remote telemetry from WebSocket
- * - Reads local vision veto flag
- * - If local veto active: BLOCK forward motion (safety override)
- * - Otherwise: Execute remote telemetry commands
+ * @brief Task: Manual Control Loop with Local Veto
+ * Applies latest dashboard command while allowing camera veto to block motion.
  */
 static void control_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Control task started on core %d", xPortGetCoreID());
 
-    telemetry_data_t telemetry;
-    TickType_t last_telemetry_time = xTaskGetTickCount();
-    const TickType_t telemetry_timeout = pdMS_TO_TICKS(2000); // 2 seconds
+    control_message_t active_command = {
+        .command = CONTROL_CMD_STOP,
+        .timestamp_ms = 0,
+        .raw_command = "stop",
+    };
+
+    TickType_t last_command_tick = xTaskGetTickCount();
+    const TickType_t command_timeout = pdMS_TO_TICKS(750);
+    bool last_ws_state = true;
 
     while (1)
     {
-        // Check local vision veto status
-        bool local_veto = vision_engine_is_veto_active();
-
-        // Wait for remote telemetry data from queue
-        if (xQueueReceive(telemetry_queue, &telemetry, pdMS_TO_TICKS(100)) == pdTRUE)
+        control_message_t incoming;
+        if (command_queue &&
+            xQueueReceive(command_queue, &incoming, pdMS_TO_TICKS(50)) == pdTRUE)
         {
-            last_telemetry_time = xTaskGetTickCount();
+            active_command = incoming;
+            last_command_tick = xTaskGetTickCount();
+        }
+        else if ((xTaskGetTickCount() - last_command_tick) > command_timeout)
+        {
+            active_command.command = CONTROL_CMD_STOP;
+            strncpy(active_command.raw_command, "stop", sizeof(active_command.raw_command) - 1);
+            active_command.raw_command[sizeof(active_command.raw_command) - 1] = '\0';
+        }
 
-            // FUSION LOGIC: Process telemetry with local veto override
-            autonomous_process_with_veto(&telemetry, local_veto);
+        bool local_veto = vision_engine_is_veto_active();
+        if (autonomous_process_with_veto(&active_command, local_veto) != ESP_OK)
+        {
+            ESP_LOGW(TAG, "Control handler rejected command %s", active_command.raw_command);
+        }
 
-            if (local_veto)
+        bool ws_connected = ws_client_is_connected();
+        if (!ws_connected)
+        {
+            if (last_ws_state)
             {
-                ESP_LOGW(TAG, "⚠️  VETO: Local camera blocked forward motion");
+                ESP_LOGE(TAG, "WebSocket disconnected - EMERGENCY STOP");
             }
+            last_ws_state = false;
+            autonomous_emergency_stop();
+            xEventGroupSetBits(system_events, EMERGENCY_STOP_BIT);
         }
         else
         {
-            // No remote telemetry received
-            // Still check local veto for safety
-            if (local_veto)
-            {
-                ESP_LOGW(TAG, "Local veto active - motors stopped");
-                motor_emergency_stop();
-            }
-
-            // Check if we haven't received telemetry for too long
-            if ((xTaskGetTickCount() - last_telemetry_time) > telemetry_timeout)
-            {
-                ESP_LOGW(TAG, "Telemetry timeout - no data for 2 seconds");
-                // Emergency stop if connection seems lost
-                if (!ws_client_is_connected())
-                {
-                    ESP_LOGE(TAG, "WebSocket disconnected - EMERGENCY STOP");
-                    autonomous_emergency_stop();
-                    xEventGroupSetBits(system_events, EMERGENCY_STOP_BIT);
-                }
-            }
+            last_ws_state = true;
         }
 
-        // Small delay to prevent task starvation
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
 
@@ -236,11 +231,11 @@ void app_main(void)
         return;
     }
 
-    // Create telemetry queue
-    telemetry_queue = xQueueCreate(10, sizeof(telemetry_data_t));
-    if (telemetry_queue == NULL)
+    // Create command queue
+    command_queue = xQueueCreate(10, sizeof(control_message_t));
+    if (command_queue == NULL)
     {
-        ESP_LOGE(TAG, "Failed to create telemetry queue");
+        ESP_LOGE(TAG, "Failed to create control queue");
         return;
     }
 
@@ -303,7 +298,7 @@ void app_main(void)
 
     // Initialize WebSocket client
     ESP_LOGI(TAG, "Initializing WebSocket client...");
-    if (ws_client_init(telemetry_received_callback) != ESP_OK)
+    if (ws_client_init(VEHICLE_ID, control_command_callback) != ESP_OK)
     {
         ESP_LOGE(TAG, "Failed to initialize WebSocket client");
         return;
@@ -377,6 +372,6 @@ void app_main(void)
         return;
     }
 
-    ESP_LOGI(TAG, "System initialization complete - entering autonomous mode");
-    ESP_LOGI(TAG, "Ready to receive telemetry and control motors");
+    ESP_LOGI(TAG, "System initialization complete - manual control ready");
+    ESP_LOGI(TAG, "Waiting for dashboard commands to drive motors");
 }

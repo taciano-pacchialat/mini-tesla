@@ -7,104 +7,216 @@
 #include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/semphr.h"
 #include "esp_websocket_client.h"
 #include "esp_log.h"
 #include "cJSON.h"
+#include <inttypes.h>
+#include <stdlib.h>
 
 static const char *TAG = "[WebSocket]";
 
 // WebSocket client handle
 static esp_websocket_client_handle_t s_client = NULL;
 
-// Callback for telemetry data
-static telemetry_callback_t s_telemetry_callback = NULL;
-
-// Mutex for thread-safe access to last telemetry
-static SemaphoreHandle_t s_telemetry_mutex = NULL;
-static telemetry_data_t s_last_telemetry = {0};
-static bool s_telemetry_valid = false;
+// Callback for manual control commands
+static control_callback_t s_control_callback = NULL;
+static char s_vehicle_id[32] = {0};
 
 // Connection state
 static bool s_is_connected = false;
+static volatile bool s_stream_enabled = false;
 
-/**
- * @brief Parse JSON telemetry data
- */
-static bool parse_telemetry_json(const char *json_str, telemetry_data_t *data)
+static control_command_t control_command_from_string(const char *command)
 {
+    if (!command)
+    {
+        return CONTROL_CMD_STOP;
+    }
+
+    if (strcmp(command, "forward") == 0)
+    {
+        return CONTROL_CMD_FORWARD;
+    }
+    if (strcmp(command, "backward") == 0)
+    {
+        return CONTROL_CMD_BACKWARD;
+    }
+    if (strcmp(command, "left") == 0)
+    {
+        return CONTROL_CMD_LEFT;
+    }
+    if (strcmp(command, "right") == 0)
+    {
+        return CONTROL_CMD_RIGHT;
+    }
+
+    return CONTROL_CMD_STOP;
+}
+
+static void handle_stream_status_message(const cJSON *root)
+{
+    bool enable = false;
+    int viewer_count = 0;
+
+    const cJSON *enable_item = cJSON_GetObjectItem(root, "enable");
+    const cJSON *viewer_item = cJSON_GetObjectItem(root, "viewer_count");
+
+    if (enable_item)
+    {
+        if (cJSON_IsBool(enable_item))
+        {
+            enable = cJSON_IsTrue(enable_item);
+        }
+        else if (cJSON_IsNumber(enable_item))
+        {
+            enable = (enable_item->valuedouble != 0);
+        }
+    }
+
+    if (viewer_item && cJSON_IsNumber(viewer_item))
+    {
+        viewer_count = viewer_item->valueint;
+    }
+
+    bool previous = s_stream_enabled;
+    s_stream_enabled = enable;
+
+    if (previous != enable)
+    {
+        ESP_LOGI(TAG, "Stream %s (viewers=%d)", enable ? "enabled" : "paused", viewer_count);
+    }
+}
+
+static void handle_control_message(const cJSON *root)
+{
+    if (!root)
+    {
+        return;
+    }
+
+    const cJSON *command_item = cJSON_GetObjectItem(root, "command");
+    if (!command_item || !cJSON_IsString(command_item))
+    {
+        ESP_LOGW(TAG, "Control message sin comando válido");
+        return;
+    }
+
+    const cJSON *vehicle_item = cJSON_GetObjectItem(root, "vehicle_id");
+    const char *vehicle = (vehicle_item && cJSON_IsString(vehicle_item)) ? vehicle_item->valuestring : NULL;
+
+    if (vehicle && vehicle[0] != '\0' && s_vehicle_id[0] != '\0' &&
+        strncmp(vehicle, s_vehicle_id, sizeof(s_vehicle_id)) != 0)
+    {
+        ESP_LOGD(TAG, "Comando para otro vehículo (%s) - ignorado", vehicle);
+        return;
+    }
+
+    control_message_t message = {
+        .command = control_command_from_string(command_item->valuestring),
+        .timestamp_ms = 0,
+    };
+
+    strncpy(message.raw_command, command_item->valuestring, sizeof(message.raw_command) - 1);
+    message.raw_command[sizeof(message.raw_command) - 1] = '\0';
+
+    const cJSON *timestamp_item = cJSON_GetObjectItem(root, "timestamp");
+    if (timestamp_item && cJSON_IsNumber(timestamp_item))
+    {
+        message.timestamp_ms = (uint64_t)timestamp_item->valuedouble;
+    }
+
+    ESP_LOGD(TAG, "Control recibido: %s (%" PRIu64 " ms)",
+             message.raw_command,
+             message.timestamp_ms);
+
+    if (s_control_callback)
+    {
+        s_control_callback(&message);
+    }
+}
+
+static void handle_text_frame(const char *json_str)
+{
+    if (!json_str)
+    {
+        return;
+    }
+
     cJSON *root = cJSON_Parse(json_str);
-    if (root == NULL)
+    if (!root)
     {
-        ESP_LOGE(TAG, "Failed to parse JSON");
-        return false;
+        ESP_LOGW(TAG, "JSON inválido: %s", json_str);
+        return;
     }
 
-    // Parse all fields
-    cJSON *item;
+    const cJSON *type_item = cJSON_GetObjectItem(root, "type");
+    const char *type = (type_item && cJSON_IsString(type_item)) ? type_item->valuestring : NULL;
 
-    item = cJSON_GetObjectItem(root, "object_type");
-    if (item && cJSON_IsString(item))
+    if (!type)
     {
-        strncpy(data->object_type, item->valuestring, sizeof(data->object_type) - 1);
+        ESP_LOGD(TAG, "Frame sin tipo - ignorado");
+        cJSON_Delete(root);
+        return;
     }
 
-    item = cJSON_GetObjectItem(root, "pixel_x");
-    if (item && cJSON_IsNumber(item))
+    if (strcmp(type, "stream_status") == 0)
     {
-        data->pixel_x = item->valueint;
+        handle_stream_status_message(root);
     }
-
-    item = cJSON_GetObjectItem(root, "pixel_y");
-    if (item && cJSON_IsNumber(item))
+    else if (strcmp(type, "control") == 0)
     {
-        data->pixel_y = item->valueint;
+        handle_control_message(root);
     }
-
-    item = cJSON_GetObjectItem(root, "world_x");
-    if (item && cJSON_IsNumber(item))
+    else
     {
-        data->world_x = (float)item->valuedouble;
-    }
-
-    item = cJSON_GetObjectItem(root, "world_y");
-    if (item && cJSON_IsNumber(item))
-    {
-        data->world_y = (float)item->valuedouble;
-    }
-
-    item = cJSON_GetObjectItem(root, "distance_cm");
-    if (item && cJSON_IsNumber(item))
-    {
-        data->distance_cm = (float)item->valuedouble;
-    }
-
-    item = cJSON_GetObjectItem(root, "angle_deg");
-    if (item && cJSON_IsNumber(item))
-    {
-        data->angle_deg = (float)item->valuedouble;
-    }
-
-    item = cJSON_GetObjectItem(root, "pixel_count");
-    if (item && cJSON_IsNumber(item))
-    {
-        data->pixel_count = item->valueint;
-    }
-
-    item = cJSON_GetObjectItem(root, "detected");
-    if (item && cJSON_IsBool(item))
-    {
-        data->detected = cJSON_IsTrue(item);
-    }
-
-    item = cJSON_GetObjectItem(root, "timestamp_ms");
-    if (item && cJSON_IsNumber(item))
-    {
-        data->timestamp_ms = (uint64_t)item->valuedouble;
+        ESP_LOGD(TAG, "Mensaje %s sin handler", type);
     }
 
     cJSON_Delete(root);
-    return true;
+}
+
+static esp_err_t send_register_message(void)
+{
+    if (!s_client)
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (s_vehicle_id[0] == '\0')
+    {
+        ESP_LOGE(TAG, "Vehicle ID no configurado, registro cancelado");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    cJSON_AddStringToObject(root, "type", "register");
+    cJSON_AddStringToObject(root, "role", "vehicle");
+    cJSON_AddStringToObject(root, "vehicle_id", s_vehicle_id);
+
+    char *json_str = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+
+    if (!json_str)
+    {
+        return ESP_ERR_NO_MEM;
+    }
+
+    int sent = esp_websocket_client_send_text(s_client, json_str, strlen(json_str), portMAX_DELAY);
+    free(json_str);
+
+    if (sent < 0)
+    {
+        ESP_LOGE(TAG, "Error enviando registro de vehículo");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Registro de vehículo enviado (%s)", s_vehicle_id);
+    return ESP_OK;
 }
 
 /**
@@ -120,45 +232,32 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
     case WEBSOCKET_EVENT_CONNECTED:
         ESP_LOGI(TAG, "WebSocket connected to server");
         s_is_connected = true;
+        s_stream_enabled = false;
+        if (send_register_message() != ESP_OK)
+        {
+            ESP_LOGW(TAG, "No se pudo enviar registro del vehículo");
+        }
         break;
 
     case WEBSOCKET_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "WebSocket disconnected, will auto-reconnect...");
         s_is_connected = false;
+        s_stream_enabled = false;
         break;
 
     case WEBSOCKET_EVENT_DATA:
-        ESP_LOGI(TAG, "Received WebSocket data: opcode=%d, len=%d",
+        ESP_LOGD(TAG, "Received WebSocket data: opcode=%d, len=%d",
                  data->op_code, data->data_len);
 
         if (data->op_code == 0x01)
-        { // Text frame (JSON telemetry)
-            // Null-terminate the data
+        { // Text frame (JSON control / status)
             char *json_str = malloc(data->data_len + 1);
             if (json_str)
             {
                 memcpy(json_str, data->data_ptr, data->data_len);
                 json_str[data->data_len] = '\0';
 
-                ESP_LOGI(TAG, "Telemetry JSON: %s", json_str);
-
-                telemetry_data_t telemetry;
-                if (parse_telemetry_json(json_str, &telemetry))
-                {
-                    // Store in thread-safe manner
-                    if (xSemaphoreTake(s_telemetry_mutex, portMAX_DELAY))
-                    {
-                        memcpy(&s_last_telemetry, &telemetry, sizeof(telemetry_data_t));
-                        s_telemetry_valid = true;
-                        xSemaphoreGive(s_telemetry_mutex);
-                    }
-
-                    // Call callback if registered
-                    if (s_telemetry_callback)
-                    {
-                        s_telemetry_callback(&telemetry);
-                    }
-                }
+                handle_text_frame(json_str);
 
                 free(json_str);
             }
@@ -180,19 +279,19 @@ static void websocket_event_handler(void *handler_args, esp_event_base_t base,
     }
 }
 
-esp_err_t ws_client_init(telemetry_callback_t callback)
+esp_err_t ws_client_init(const char *vehicle_id, control_callback_t callback)
 {
     ESP_LOGI(TAG, "Initializing WebSocket client...");
 
-    s_telemetry_callback = callback;
-
-    // Create mutex for telemetry access
-    s_telemetry_mutex = xSemaphoreCreateMutex();
-    if (s_telemetry_mutex == NULL)
+    if (!vehicle_id || vehicle_id[0] == '\0')
     {
-        ESP_LOGE(TAG, "Failed to create telemetry mutex");
-        return ESP_FAIL;
+        ESP_LOGE(TAG, "Vehicle ID inválido");
+        return ESP_ERR_INVALID_ARG;
     }
+
+    s_control_callback = callback;
+    strncpy(s_vehicle_id, vehicle_id, sizeof(s_vehicle_id) - 1);
+    s_vehicle_id[sizeof(s_vehicle_id) - 1] = '\0';
 
     // Configure WebSocket client
     esp_websocket_client_config_t ws_cfg = {
@@ -290,11 +389,27 @@ esp_err_t ws_client_send_status(const vehicle_status_t *status)
     return ESP_OK;
 }
 
+bool ws_client_stream_enabled(void)
+{
+    return s_stream_enabled;
+}
+
 esp_err_t ws_client_send_frame(const uint8_t *frame, size_t length)
 {
-    if (frame == NULL || length == 0)
+    if (!frame || length == 0)
     {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!ws_client_is_connected())
+    {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!ws_client_stream_enabled())
+    {
+        ESP_LOGV(TAG, "Streaming deshabilitado - descartando frame (%d bytes)", (int)length);
+        return ESP_ERR_INVALID_STATE;
     }
 
     if (length > WS_MAX_PAYLOAD_SIZE)
@@ -302,12 +417,6 @@ esp_err_t ws_client_send_frame(const uint8_t *frame, size_t length)
         ESP_LOGW(TAG, "JPEG demasiado grande (%d bytes > %d) - descartado",
                  (int)length, WS_MAX_PAYLOAD_SIZE);
         return ESP_ERR_INVALID_SIZE;
-    }
-
-    if (s_client == NULL || !ws_client_is_connected())
-    {
-        ESP_LOGW(TAG, "Cannot send frame: WebSocket no conectado");
-        return ESP_FAIL;
     }
 
     int sent = esp_websocket_client_send_bin(s_client,
@@ -339,6 +448,7 @@ esp_err_t ws_client_disconnect(void)
 
     ESP_LOGI(TAG, "Disconnecting WebSocket client...");
     s_is_connected = false;
+    s_stream_enabled = false;
 
     esp_err_t err = esp_websocket_client_stop(s_client);
     if (err == ESP_OK)
@@ -349,21 +459,4 @@ esp_err_t ws_client_disconnect(void)
     }
 
     return err;
-}
-
-esp_err_t ws_client_get_last_telemetry(telemetry_data_t *data)
-{
-    if (data == NULL || !s_telemetry_valid)
-    {
-        return ESP_FAIL;
-    }
-
-    if (xSemaphoreTake(s_telemetry_mutex, pdMS_TO_TICKS(100)))
-    {
-        memcpy(data, &s_last_telemetry, sizeof(telemetry_data_t));
-        xSemaphoreGive(s_telemetry_mutex);
-        return ESP_OK;
-    }
-
-    return ESP_FAIL;
 }

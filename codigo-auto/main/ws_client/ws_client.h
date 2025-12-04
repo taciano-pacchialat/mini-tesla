@@ -3,8 +3,8 @@
  * @brief WebSocket Client for bidirectional communication with ESP32-S3 server
  *
  * Establishes persistent WebSocket connection for:
- * - Receiving telemetry data (JSON text frames)
- * - Receiving video frames (binary frames)
+ * - Receiving manual control commands + stream status (JSON text frames)
+ * - Sending JPEG video frames (binary frames)
  * - Sending vehicle status updates (JSON text frames)
  */
 
@@ -12,7 +12,7 @@
 #define WS_CLIENT_H
 
 #include <stdbool.h>
-#include "esp_err.h"
+#include <stdint.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
@@ -29,21 +29,23 @@ extern "C"
 #define WS_RECONNECT_TIMEOUT_MS 5000
 
     /**
-     * @brief Telemetry data structure received from server
+     * @brief Manual control commands supported by the dashboard
      */
+    typedef enum
+    {
+        CONTROL_CMD_STOP = 0,
+        CONTROL_CMD_FORWARD,
+        CONTROL_CMD_BACKWARD,
+        CONTROL_CMD_LEFT,
+        CONTROL_CMD_RIGHT,
+    } control_command_t;
+
     typedef struct
     {
-        char object_type[32];  // "obstacle" or "target"
-        int pixel_x;           // X coordinate in image
-        int pixel_y;           // Y coordinate in image
-        float world_x;         // Real-world X (cm)
-        float world_y;         // Real-world Y (cm)
-        float distance_cm;     // Euclidean distance
-        float angle_deg;       // Angle relative to vehicle
-        int pixel_count;       // Area of detected object
-        bool detected;         // Detection flag
-        uint64_t timestamp_ms; // Server timestamp
-    } telemetry_data_t;
+        control_command_t command;
+        uint64_t timestamp_ms;
+        char raw_command[16];
+    } control_message_t;
 
     /**
      * @brief Vehicle status structure to send to server
@@ -58,11 +60,9 @@ extern "C"
     } vehicle_status_t;
 
     /**
-     * @brief Callback type for telemetry data reception
-     *
-     * @param data Pointer to received telemetry data
+     * @brief Callback invoked when a control message arrives from the server
      */
-    typedef void (*telemetry_callback_t)(const telemetry_data_t *data);
+    typedef void (*control_callback_t)(const control_message_t *message);
 
     /**
      * @brief Initialize WebSocket client
@@ -70,10 +70,11 @@ extern "C"
      * Sets up the WebSocket client and registers callback.
      * Must be called after WiFi connection is established.
      *
-     * @param callback Function to call when telemetry is received
+     * @param vehicle_id Null-terminated ID reported to the server
+     * @param callback Function to call when manual control arrives
      * @return ESP_OK on success
      */
-    esp_err_t ws_client_init(telemetry_callback_t callback);
+    esp_err_t ws_client_init(const char *vehicle_id, control_callback_t callback);
 
     /**
      * @brief Connect to WebSocket server
@@ -122,14 +123,11 @@ extern "C"
     esp_err_t ws_client_disconnect(void);
 
     /**
-     * @brief Get last received telemetry data
+     * @brief Enable/disable streaming of video frames
      *
-     * Thread-safe copy of most recent telemetry.
-     *
-     * @param data Pointer to buffer for telemetry data
-     * @return ESP_OK if valid data available, ESP_FAIL otherwise
+     * @return true if streaming is enabled, false otherwise
      */
-    esp_err_t ws_client_get_last_telemetry(telemetry_data_t *data);
+    bool ws_client_stream_enabled(void);
 
 #ifdef __cplusplus
 }

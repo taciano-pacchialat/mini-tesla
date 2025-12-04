@@ -51,7 +51,6 @@ static void vision_task_function(void *pvParameters)
         }
 
         detection_result_t detection = {0};
-        telemetry_data_t telemetry = {0};
 
         // Procesar detección si está habilitado
         if (processing_enabled && fb->format == PIXFORMAT_RGB565)
@@ -64,35 +63,6 @@ static void vision_task_function(void *pvParameters)
                 current_color,
                 &h_matrix,
                 &detection);
-
-            // Preparar datos de telemetría
-            if (detection.detected)
-            {
-                snprintf(telemetry.object_type, sizeof(telemetry.object_type), "Object");
-                telemetry.pixel_x = detection.centroid_x;
-                telemetry.pixel_y = detection.centroid_y;
-                telemetry.world_x = detection.world_coords.x;
-                telemetry.world_y = detection.world_coords.y;
-                telemetry.pixel_count = detection.pixel_count;
-                telemetry.detected = true;
-
-                // Calcular distancia euclidiana
-                telemetry.distance_cm = sqrtf(
-                    detection.world_coords.x * detection.world_coords.x +
-                    detection.world_coords.y * detection.world_coords.y);
-
-                // Calcular ángulo relativo al centro
-                telemetry.angle_deg = atan2f(detection.world_coords.y, detection.world_coords.x) * 180.0f / M_PI;
-            }
-            else
-            {
-                telemetry.detected = false;
-            }
-
-            telemetry.timestamp_ms = esp_timer_get_time() / 1000;
-
-            // Enviar telemetría por WebSocket (asíncrono)
-            ws_server_send_telemetry(&telemetry);
         }
 
         // Convertir frame a JPEG si hay clientes conectados

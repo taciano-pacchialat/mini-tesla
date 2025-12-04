@@ -46,7 +46,7 @@ extern "C"
 // MOTOR PINS - Configuración para L298N Motor Driver
 // ============================================================================
 // Motor A (Izquierdo)
-#define MOTOR_LEFT_PWM 33 // GPIO33 - ENA (PWM) Motor A (keeps flash LED free)
+#define MOTOR_LEFT_PWM 4  // GPIO33 - ENA (PWM) Motor A (keeps flash LED free)
 #define MOTOR_LEFT_IN1 2  // GPIO 2  - IN1 Motor A
 #define MOTOR_LEFT_IN2 14 // GPIO 14 - IN2 Motor A
 

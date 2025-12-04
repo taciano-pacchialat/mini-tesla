@@ -147,7 +147,7 @@ static inline void disable_camera_flash_led(void) {}
 
 static bool stream_frame_over_ws(camera_fb_t *fb)
 {
-    if (!ws_client_is_connected())
+    if (!ws_client_is_connected() || !ws_client_stream_enabled())
     {
         return false;
     }
