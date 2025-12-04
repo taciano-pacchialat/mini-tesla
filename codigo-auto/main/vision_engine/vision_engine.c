@@ -17,6 +17,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"
+#include "driver/gpio.h"
 #include <string.h>
 #include <math.h>
 #include <stdlib.h>
@@ -126,6 +127,24 @@ static bool s_task_running = false;
 static uint32_t s_frame_counter = 0;
 static uint64_t s_total_process_time_us = 0;
 
+#if defined(CAM_FLASH_LED_GPIO) && (CAM_FLASH_LED_GPIO >= 0)
+static void disable_camera_flash_led(void)
+{
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << CAM_FLASH_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+    };
+
+    gpio_config(&cfg);
+    gpio_set_level(CAM_FLASH_LED_GPIO, 0);
+    ESP_LOGI(TAG, "Camera flash LED forced LOW (GPIO%d)", CAM_FLASH_LED_GPIO);
+}
+#else
+static inline void disable_camera_flash_led(void) {}
+#endif
+
 static bool stream_frame_over_ws(camera_fb_t *fb)
 {
     if (!ws_client_is_connected())
@@ -220,6 +239,8 @@ static esp_err_t init_camera(void)
         ESP_LOGE(TAG, "Camera init failed with error 0x%x", err);
         return err;
     }
+
+    disable_camera_flash_led();
 
     // Camera sensor tuning
     sensor_t *s = esp_camera_sensor_get();
@@ -368,8 +389,11 @@ static esp_err_t process_frame(vision_result_t *result)
         int bbox_width = (max_x - min_x) + 1;
         result->distance_cm = estimate_distance(bbox_width);
 
-        ESP_LOGI(TAG, "Obstáculo verde: %.1f cm @ (%d,%d) area=%d",
-                 result->distance_cm, result->centroid_x, result->centroid_y, result->contour_area);
+        if (s_debug_enabled)
+        {
+            ESP_LOGI(TAG, "Obstáculo verde: %.1f cm @ (%d,%d) area=%d",
+                     result->distance_cm, result->centroid_x, result->centroid_y, result->contour_area);
+        }
     }
     else
     {
@@ -430,7 +454,7 @@ static void vision_task(void *pvParameters)
                 s_veto_active = (result.obstacle_detected &&
                                  result.distance_cm < VETO_DISTANCE_THRESHOLD_CM);
 
-                if (s_veto_active)
+                if (s_veto_active && s_debug_enabled)
                 {
                     ESP_LOGW(TAG, "VETO ACTIVE: Obstacle at %.1f cm (threshold %.1f cm)",
                              result.distance_cm, VETO_DISTANCE_THRESHOLD_CM);

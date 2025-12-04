@@ -20,7 +20,7 @@ extern "C"
 
 // WiFi credentials for connecting to ESP32-S3 SoftAP
 #define WIFI_SSID "ESP32-Vision-Bot"
-#define WIFI_PASSWORD "vision2025"
+#define WIFI_PASSWORD "12345678"
 #define WIFI_SERVER_IP "192.168.4.1"
 
 // Connection parameters

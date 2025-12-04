@@ -11,22 +11,32 @@
 
 #include "esp_err.h"
 #include <stdbool.h>
+#include "../hardware_config.h"
 
 #ifdef __cplusplus
 extern "C"
 {
 #endif
 
-// Motor GPIO pin definitions for ESP32-CAM with L298N
-// Motor A (Left) - ENA=GPIO4, IN1=GPIO2, IN2=GPIO14
-#define MOTOR_LEFT_PWM_GPIO 4  // ENA - PWM signal
-#define MOTOR_LEFT_IN1_GPIO 2  // IN1 - Direction bit 1
-#define MOTOR_LEFT_IN2_GPIO 14 // IN2 - Direction bit 2
+#ifndef MOTOR_LEFT_PWM_GPIO
+#define MOTOR_LEFT_PWM_GPIO MOTOR_LEFT_PWM
+#endif
+#ifndef MOTOR_LEFT_IN1_GPIO
+#define MOTOR_LEFT_IN1_GPIO MOTOR_LEFT_IN1
+#endif
+#ifndef MOTOR_LEFT_IN2_GPIO
+#define MOTOR_LEFT_IN2_GPIO MOTOR_LEFT_IN2
+#endif
 
-// Motor B (Right) - ENB=GPIO12, IN3=GPIO15, IN4=GPIO13
-#define MOTOR_RIGHT_PWM_GPIO 12 // ENB - PWM signal
-#define MOTOR_RIGHT_IN1_GPIO 15 // IN3 - Direction bit 1
-#define MOTOR_RIGHT_IN2_GPIO 13 // IN4 - Direction bit 2
+#ifndef MOTOR_RIGHT_PWM_GPIO
+#define MOTOR_RIGHT_PWM_GPIO MOTOR_RIGHT_PWM
+#endif
+#ifndef MOTOR_RIGHT_IN1_GPIO
+#define MOTOR_RIGHT_IN1_GPIO MOTOR_RIGHT_IN1
+#endif
+#ifndef MOTOR_RIGHT_IN2_GPIO
+#define MOTOR_RIGHT_IN2_GPIO MOTOR_RIGHT_IN2
+#endif
 
 // PWM configuration
 #define MOTOR_PWM_FREQ_HZ 1000            // 1 kHz PWM frequency

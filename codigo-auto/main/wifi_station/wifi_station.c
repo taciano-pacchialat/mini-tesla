@@ -24,6 +24,8 @@ static EventGroupHandle_t s_wifi_event_group;
 
 static int s_retry_num = 0;
 static bool s_is_connected = false;
+static esp_event_handler_instance_t s_wifi_any_id_instance = NULL;
+static esp_event_handler_instance_t s_ip_got_ip_instance = NULL;
 
 /**
  * @brief WiFi event handler
@@ -96,12 +98,12 @@ esp_err_t wifi_station_init(void)
                                                         ESP_EVENT_ANY_ID,
                                                         &wifi_event_handler,
                                                         NULL,
-                                                        NULL));
+                                                        &s_wifi_any_id_instance));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                                                         IP_EVENT_STA_GOT_IP,
                                                         &wifi_event_handler,
                                                         NULL,
-                                                        NULL));
+                                                        &s_ip_got_ip_instance));
 
     ESP_LOGI(TAG, "WiFi Station initialized successfully");
     return ESP_OK;
@@ -112,22 +114,28 @@ esp_err_t wifi_station_connect(void)
     ESP_LOGI(TAG, "Connecting to AP: %s", WIFI_SSID);
 
     // Configure WiFi as station
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
-            .pmf_cfg = {
-                .capable = true,
-                .required = false},
-        },
-    };
+    wifi_config_t wifi_config = {0};
+    strlcpy((char *)wifi_config.sta.ssid, WIFI_SSID, sizeof(wifi_config.sta.ssid));
+    strlcpy((char *)wifi_config.sta.password, WIFI_PASSWORD, sizeof(wifi_config.sta.password));
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA_WPA2_PSK;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
+    wifi_config.sta.listen_interval = 0;
+    wifi_config.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+
+    s_retry_num = 0;
+    s_is_connected = false;
+    if (s_wifi_event_group)
+    {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT | WIFI_FAIL_BIT);
+    }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "WiFi station started");
+    ESP_LOGI(TAG, "WiFi station started (power save disabled)");
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
 
     // Wait for connection or failure
     EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -144,6 +152,7 @@ esp_err_t wifi_station_connect(void)
     else if (bits & WIFI_FAIL_BIT)
     {
         ESP_LOGE(TAG, "Failed to connect to AP");
+        esp_wifi_stop();
         return ESP_FAIL;
     }
     else
