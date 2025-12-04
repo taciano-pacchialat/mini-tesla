@@ -1,7 +1,6 @@
 idf_component_register(
     SRCS 
         "main_softap.c"
-        "wifi/wifi.c"
         "camera_driver/camera_driver.c"
         "webserver/webserver.c"
         "vision/vision.c"

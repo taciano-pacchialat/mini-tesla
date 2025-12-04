@@ -3,7 +3,7 @@
   "idf.espIdfPath": "/home/taci/esp/esp-idf",
   "idf.pythonInstallPath": "/usr/bin/python3",
   "idf.openOcdConfigs": ["board/esp32-bridge.cfg"],
-  "idf.port": "/dev/ttyUSB0",
+  "idf.port": "/dev/ttyUSB1",
   "idf.toolsPath": "/home/taci/.espressif",
   "idf.customExtraVars": {
     "IDF_TARGET": "esp32"

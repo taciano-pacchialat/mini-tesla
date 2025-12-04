@@ -28,7 +28,6 @@
 #include "test_homography.h"
 
 // Configuración de modo de operación
-#define USE_SOFTAP_MODE 1 // 1 = SoftAP, 0 = Station (WiFi existente)
 #define ENABLE_DETECTION_TEST 0
 #define ENABLE_HOMOGRAPHY_TEST 0
 
@@ -49,7 +48,6 @@ void app_main(void)
     ESP_LOGI(TAG, "╚════════════════════════════════════════════════╝");
 
     // ========== INICIALIZACIÓN DE RED ==========
-#if USE_SOFTAP_MODE
     ESP_LOGI(TAG, "[1/4] Inicializando SoftAP...");
     ret = softap_init();
     if (ret != ESP_OK)
@@ -58,20 +56,6 @@ void app_main(void)
         return;
     }
     ESP_LOGI(TAG, "✓ SoftAP iniciado: ESP32-Vision-Bot @ 192.168.4.1");
-#else
-    ESP_LOGI(TAG, "[1/4] Inicializando WiFi Station...");
-    ret = wifi_init_sta();
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Error inicializando WiFi Station");
-        return;
-    }
-    char ip_address[16] = {0};
-    if (wifi_get_ip_address(ip_address, sizeof(ip_address)) == ESP_OK)
-    {
-        ESP_LOGI(TAG, "✓ WiFi conectado: %s", ip_address);
-    }
-#endif
 
     // ========== INICIALIZACIÓN DE CÁMARA ==========
     ESP_LOGI(TAG, "[2/4] Inicializando cámara OV2640...");
@@ -108,13 +92,9 @@ void app_main(void)
     ESP_LOGI(TAG, "╔════════════════════════════════════════════════╗");
     ESP_LOGI(TAG, "║          SISTEMA COMPLETAMENTE ACTIVO          ║");
     ESP_LOGI(TAG, "╠════════════════════════════════════════════════╣");
-#if USE_SOFTAP_MODE
     ESP_LOGI(TAG, "║ 1. Conectar WiFi a: ESP32-Vision-Bot           ║");
     ESP_LOGI(TAG, "║ 2. Contraseña: 12345678                        ║");
     ESP_LOGI(TAG, "║ 3. Abrir: http://192.168.4.1                   ║");
-#else
-    ESP_LOGI(TAG, "║ URL: http://%s", ip_address);
-#endif
     ESP_LOGI(TAG, "║                                                ║");
     ESP_LOGI(TAG, "║ WebSocket:                                     ║");
     ESP_LOGI(TAG, "║   - Telemetría: JSON (texto)                   ║");
