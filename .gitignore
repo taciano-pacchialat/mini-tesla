@@ -1,3 +1,44 @@
-build/
-sdkconfig
-sdkconfig.old
+# ------------------------------
+# Global IDE / OS cruft
+# ------------------------------
+.vscode/
+.idea/
+*.code-workspace
+.DS_Store
+Thumbs.db
+
+# ------------------------------
+# Python / tooling caches
+# ------------------------------
+__pycache__/
+*.pyc
+*.pyo
+*.pytest_cache/
+
+# ------------------------------
+# ESP-IDF build outputs (any subproject)
+# ------------------------------
+**/build/
+**/sdkconfig
+**/sdkconfig.old
+**/sdkconfig.*.bak
+**/sdkconfig.*.backup
+
+# Generated flash args, env dumps, logs
+**/flasher_args.json
+**/flash_args
+**/flash_app_args
+**/flash_project_args
+**/config.env
+**/*.log
+
+# CMake/Ninja metadata that gets regenerated
+**/CMakeFiles/
+**/CMakeCache.txt
+**/cmake_install.cmake
+**/compile_commands.json
+
+# Misc temporary files
+*.tmp
+*.swp
+*.swo
