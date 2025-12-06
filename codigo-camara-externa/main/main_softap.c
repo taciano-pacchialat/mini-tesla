@@ -78,14 +78,15 @@ void app_main(void)
     ESP_LOGI(TAG, "✓ Servidor WebSocket activo en Core 0");
 
     // ========== INICIALIZACIÓN DE TAREA DE VISIÓN ==========
-    ESP_LOGI(TAG, "[4/4] Iniciando tarea de visión en Core 1...");
-    ret = vision_task_start();
-    if (ret != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Error iniciando tarea de visión");
-        return;
-    }
-    ESP_LOGI(TAG, "✓ Tarea de visión activa en Core 1");
+    //! Desactivada
+    // ESP_LOGI(TAG, "[4/4] Iniciando tarea de visión en Core 1...");
+    // ret = vision_task_start();
+    // if (ret != ESP_OK)
+    // {
+    //     ESP_LOGE(TAG, "Error iniciando tarea de visión");
+    //     return;
+    // }
+    // ESP_LOGI(TAG, "✓ Tarea de visión activa en Core 1");
 
     // ========== SISTEMA LISTO ==========
     ESP_LOGI(TAG, "");
