@@ -14,11 +14,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pytest_cache/
+**/.venv
 
-# ------------------------------
-# ESP-IDF build outputs (any subproject)
-# ------------------------------
-**/build/
 **/sdkconfig
 **/sdkconfig.old
 **/sdkconfig.*.bak
