@@ -125,7 +125,7 @@ static void handle_control_message(const cJSON *root)
         message.timestamp_ms = (uint64_t)timestamp_item->valuedouble;
     }
 
-    ESP_LOGD(TAG, "Control recibido: %s (%" PRIu64 " ms)",
+    ESP_LOGD(TAG, "Comando recibido: %s (%" PRIu64 " ms)",
              message.raw_command,
              message.timestamp_ms);
 

@@ -27,20 +27,28 @@ static bool s_task_running = false;
 static bool s_reverse_only_mode = false;
 static int64_t s_last_stream_us = 0; // seguimiento de streaming
 
-/* Parámetros del detector */
-#define ORANGE_R_MIN            185
-#define ORANGE_G_MIN             70
-#define ORANGE_G_MAX            180
-#define ORANGE_B_MAX             90
-#define ORANGE_RG_DELTA_MIN      40
-#define ORANGE_RB_DELTA_MIN      85
-#define ORANGE_MIN_PIXELS        400
-#define ORANGE_MIN_FRACTION      0.010f   // 1 % del frame
-#define ORANGE_MIN_PIXELS_PER_ROW 25
-#define ORANGE_MIN_ROWS           8
-#define ORANGE_DISTANCE_LOCK_CM  35.0f
+// Definimos frequencia de la camara
+#define CAM_FREQ_HZ 20000000
 
-#define CAM_JPEG_QUALITY 10
+
+/* Parámetros del detector */
+// Ajuste para objeto naranja pálido/brillante en pantalla
+
+#define ORANGE_R_MIN            140
+#define ORANGE_G_MIN             120
+#define ORANGE_G_MAX            150
+#define ORANGE_B_MAX             130
+
+#define ORANGE_RG_DELTA_MIN      30
+#define ORANGE_RB_DELTA_MIN     50
+
+#define ORANGE_MIN_PIXELS        300
+#define ORANGE_MIN_FRACTION      0.0075f
+#define ORANGE_MIN_PIXELS_PER_ROW 25
+#define ORANGE_MIN_ROWS          10
+#define ORANGE_DISTANCE_LOCK_CM  20.0f
+
+#define CAM_JPEG_QUALITY 8
 #define STREAM_JPEG_QUALITY     25
 #define STREAM_MIN_INTERVAL_US  (120 * 1000)
 
@@ -95,7 +103,7 @@ static esp_err_t configure_camera(void)
         .pin_vsync = CAM_PIN_VSYNC,
         .pin_href = CAM_PIN_HREF,
         .pin_pclk = CAM_PIN_PCLK,
-        .xclk_freq_hz = 20000000,
+        .xclk_freq_hz = CAM_FREQ_HZ,
         .ledc_timer = LEDC_TIMER_1,
         .ledc_channel = LEDC_CHANNEL_2,
         .pixel_format = CAM_PIXEL_FORMAT,
@@ -116,21 +124,15 @@ static esp_err_t configure_camera(void)
     if (sensor) {
         sensor->set_pixformat(sensor, PIXFORMAT_RGB565);
         sensor->set_framesize(sensor, CAM_FRAME_SIZE);
-        if (sensor->set_whitebal) sensor->set_whitebal(sensor, 0);   // desactiva AWB auto
-        if (sensor->set_awb_gain) sensor->set_awb_gain(sensor, 0);
-        if (sensor->set_wb_mode)  sensor->set_wb_mode(sensor, 2);    // Daylight
-        if (sensor->set_brightness) sensor->set_brightness(sensor, 1);
-        if (sensor->set_contrast)   sensor->set_contrast(sensor, 1);
+        if (sensor->set_whitebal)   sensor->set_whitebal(sensor, 1);  // AWB ON
+        if (sensor->set_awb_gain)   sensor->set_awb_gain(sensor, 1);
+        if (sensor->set_wb_mode)    sensor->set_wb_mode(sensor, 0);   // modo Auto neutro
+        if (sensor->set_brightness) sensor->set_brightness(sensor, 0);
+        if (sensor->set_contrast)   sensor->set_contrast(sensor, 0);
+        if (sensor->set_saturation) sensor->set_saturation(sensor, 0);
+
     }
 
-#if defined(CAM_FLASH_LED_GPIO) && (CAM_FLASH_LED_GPIO >= 0)
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << CAM_FLASH_LED_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-    };
-    gpio_config(&cfg);
-    gpio_set_level(CAM_FLASH_LED_GPIO, 0);
-#endif
 
     ESP_LOGI(TAG, "Camera ready: %dx%d RGB565", IMAGE_WIDTH, IMAGE_HEIGHT);
     return ESP_OK;
@@ -350,6 +352,6 @@ bool vision_engine_command_allowed(control_command_t command)
     case CONTROL_CMD_STOP:
         return true;
     default:
-        return false;
+        return true; // poner en false para bloquear otros comandos
     }
 }
