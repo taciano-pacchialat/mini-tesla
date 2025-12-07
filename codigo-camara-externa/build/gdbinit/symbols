@@ -17,4 +17,4 @@ set confirm off
 set confirm on
 
 # Load application symbols
-file /home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/build/pueba-esp32-espidf.elf
+file /home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/build/codigo-camara-externa.elf

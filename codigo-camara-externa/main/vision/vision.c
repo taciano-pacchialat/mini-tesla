@@ -1,6 +1,7 @@
 #include "vision.h"
 #include "esp_log.h"
 #include <string.h>
+#include <math.h>
 
 static const char *TAG = "Vision";
 
@@ -13,13 +14,16 @@ const color_range_t COLOR_RED = {
     .v_max = 255};
 
 const color_range_t COLOR_GREEN = {
-    .h_min = 60, .h_max = 100, .s_min = 80, .s_max = 255, .v_min = 80, .v_max = 255};
+    .h_min = 40, .h_max = 80, .s_min = 60, .s_max = 255, .v_min = 60, .v_max = 255};  // auto (verde)
 
 const color_range_t COLOR_BLUE = {
     .h_min = 140, .h_max = 180, .s_min = 80, .s_max = 255, .v_min = 80, .v_max = 255};
 
 const color_range_t COLOR_YELLOW = {
     .h_min = 35, .h_max = 55, .s_min = 100, .s_max = 255, .v_min = 100, .v_max = 255};
+
+const color_range_t COLOR_ORANGE = {
+    .h_min = 10, .h_max = 30, .s_min = 80, .s_max = 255, .v_min = 80, .v_max = 255};  // obstáculo (naranja)
 
 /**
  * Conversión RGB565 a HSV optimizada con aritmética de enteros
@@ -158,15 +162,14 @@ void detect_object_by_color(const uint16_t *frame_buffer,
         // Transformar coordenadas de píxeles a mundo real si hay matriz
         if (h_matrix)
         {
-            pixel_point_t pixel_pt = {
-                .u = result->centroid_x,
-                .v = result->centroid_y};
+            pixel_point_t pixel_pt = {.u = result->centroid_x, .v = result->centroid_y};
             homography_transform(h_matrix, pixel_pt, &result->world_coords);
 
-            ESP_LOGI(TAG, "Object detected at pixel (%d, %d) -> world (%.2f cm, %.2f cm), %lu pixels",
-                     result->centroid_x, result->centroid_y,
-                     result->world_coords.x, result->world_coords.y,
-                     result->pixel_count);
+            // Limitar a la superficie física (0–60 cm en X/Y)
+            const float kMin = 0.0f;
+            const float kMax = 60.0f;
+            result->world_coords.x = fminf(fmaxf(result->world_coords.x, kMin), kMax);
+            result->world_coords.y = fminf(fmaxf(result->world_coords.y, kMin), kMax);
         }
         else
         {

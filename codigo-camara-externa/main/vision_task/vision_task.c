@@ -11,11 +11,16 @@
 
 static const char *TAG = "VisionTask";
 
+extern const color_range_t COLOR_ORANGE;
+
 static TaskHandle_t vision_task_handle = NULL;
 static QueueHandle_t frame_queue = NULL;
-static const color_range_t *current_color = &COLOR_RED;
+static const color_range_t *current_color = &COLOR_ORANGE;
+static const char *current_color_name = "ORANGE";
 static bool processing_enabled = true;
 static homography_matrix_t h_matrix;
+
+static const float HOMOGRAPHY_S3_COEFFS[9] = {0.215841f, -0.038741f, -13.556207f, -0.134921f, -0.597509f, 138.725449f, -0.001223f, 0.000375f, 1.000000f};
 
 /**
  * @brief Convierte camera_fb_t a JPEG
@@ -32,9 +37,6 @@ static bool frame_to_jpeg(camera_fb_t *fb, uint8_t **jpeg_data, size_t *jpeg_len
 static void vision_task_function(void *pvParameters)
 {
     ESP_LOGI(TAG, "Tarea de visión iniciada en Core %d", xPortGetCoreID());
-
-    // Inicializar matriz de homografía
-    homography_load_default(&h_matrix, 640, 480, 100.0f, 80.0f);
 
     uint32_t frame_count = 0;
     uint32_t last_fps_time = esp_timer_get_time() / 1000;
@@ -55,7 +57,6 @@ static void vision_task_function(void *pvParameters)
         // Procesar detección si está habilitado
         if (processing_enabled && fb->format == PIXFORMAT_RGB565)
         {
-            // Detectar objeto con transformación homográfica
             detect_object_by_color(
                 (uint16_t *)fb->buf,
                 fb->width,
@@ -82,15 +83,28 @@ static void vision_task_function(void *pvParameters)
         // Liberar frame buffer
         esp_camera_fb_return(fb);
 
-        // Calcular FPS
-        frame_count++;
+        // Log de detección
+        static uint32_t last_detection_log_ms = 0;
         uint32_t now = esp_timer_get_time() / 1000;
+        if (detection.detected && (now - last_detection_log_ms) >= 1000)
+        {
+            ESP_LOGI(TAG, "[%s] Pixel(%d,%d) -> Mundo(%.2f cm, %.2f cm), %lu px",
+                     current_color_name,
+                     detection.centroid_x,
+                     detection.centroid_y,
+                     detection.world_coords.x,
+                     detection.world_coords.y,
+                     detection.pixel_count);
+            last_detection_log_ms = now;
+        }
+
+        frame_count++;
         if (now - last_fps_time >= 1000)
         {
             ESP_LOGI(TAG, "FPS: %lu | Clientes WS: %d | Detección: %s",
                      frame_count,
                      ws_server_get_clients_count(),
-                     detection.detected ? "SI" : "NO");
+                     detection.detected ? current_color_name : "NO");
             frame_count = 0;
             last_fps_time = now;
         }
@@ -106,12 +120,13 @@ esp_err_t vision_task_start(void)
 {
     if (vision_task_handle != NULL)
     {
-        ESP_LOGW(TAG, "Tarea de visión ya está corriendo");
-        return ESP_OK;
+        return ESP_ERR_INVALID_STATE;
     }
 
-    // Crear cola para frames procesados
-    frame_queue = xQueueCreate(VISION_QUEUE_SIZE, sizeof(processed_frame_t));
+    // Inicializa la homografía con los coeficientes calibrados del ESP32-S3
+    homography_init(&h_matrix, HOMOGRAPHY_S3_COEFFS);
+
+    frame_queue = xQueueCreate(3, sizeof(camera_fb_t *));
     if (frame_queue == NULL)
     {
         ESP_LOGE(TAG, "Error creando cola de frames");
@@ -172,21 +187,25 @@ QueueHandle_t vision_task_get_queue(void)
 
 esp_err_t vision_task_set_target_color(const char *color_name)
 {
-    if (strcmp(color_name, "RED") == 0)
+    if (strcmp(color_name, "ORANGE") == 0)
     {
-        current_color = &COLOR_RED;
+        current_color = &COLOR_ORANGE;
+        current_color_name = "ORANGE";
     }
     else if (strcmp(color_name, "GREEN") == 0)
     {
         current_color = &COLOR_GREEN;
+        current_color_name = "GREEN";
     }
     else if (strcmp(color_name, "BLUE") == 0)
     {
         current_color = &COLOR_BLUE;
+        current_color_name = "BLUE";
     }
     else if (strcmp(color_name, "YELLOW") == 0)
     {
         current_color = &COLOR_YELLOW;
+        current_color_name = "YELLOW";
     }
     else
     {

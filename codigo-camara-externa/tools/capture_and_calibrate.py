@@ -19,7 +19,12 @@ import matplotlib.image as mpimg
 from websocket import create_connection  # pip install websocket-client
 
 sys.path.append(str(Path(__file__).resolve().parent))
-from homography_calibrator import PixelPoint, WorldPoint, solve_homography, print_results  # noqa: E402
+from homography_calibrator import (
+    PixelPoint,
+    WorldPoint,
+    solve_homography,
+    _print_results,
+)  # noqa: E402
 
 
 def capture_frame(ws_url: str, outfile: Path) -> None:
@@ -64,10 +69,12 @@ def prompt_world_points():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ws", default="ws://192.168.4.1/ws",
-                        help="WebSocket del ESP32-S3")
-    parser.add_argument("--output", default="capture.jpg",
-                        help="Ruta donde guardar la foto")
+    parser.add_argument(
+        "--ws", default="ws://192.168.4.1/ws", help="WebSocket del ESP32-S3"
+    )
+    parser.add_argument(
+        "--output", default="capture.jpg", help="Ruta donde guardar la foto"
+    )
     args = parser.parse_args()
 
     out = Path(args.output).resolve()
@@ -79,7 +86,7 @@ def main():
     worlds = prompt_world_points()
 
     H = solve_homography(pixels, worlds)
-    print_results(H, pixels, worlds)
+    _print_results(H, pixels, worlds)
 
 
 if __name__ == "__main__":

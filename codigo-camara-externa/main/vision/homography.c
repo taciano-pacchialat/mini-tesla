@@ -87,8 +87,5 @@ bool homography_calculate(homography_matrix_t *H,
     ESP_LOGW(TAG, "Full homography calculation not implemented on-chip");
     ESP_LOGW(TAG, "Use homography_init() with pre-calculated coefficients");
 
-    // Por ahora, usar transformación por defecto
-    homography_load_default(H, 640, 480, 100.0f, 100.0f);
-
     return false;
 }
