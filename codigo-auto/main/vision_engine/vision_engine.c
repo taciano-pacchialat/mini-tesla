@@ -1,213 +1,89 @@
 /**
  * @file vision_engine.c
- * @brief Local vision processing implementation for ESP32-CAM
- *
- * CRITICAL NOTES:
- * - Uses C-style OpenCV macros (CV_*) not C++ constants (cv::COLOR_*)
- * - RGB565 requires endianness correction for OV2640 sensor
- * - Zero-copy architecture to minimize memory operations
- * - All frame buffers allocated in external PSRAM
+ * @brief Detección simple de objeto naranja para bloqueo de movimiento.
  */
 
 #include "vision_engine.h"
 #include "../hardware_config.h"
-#include "../ws_client/ws_client.h"
-#include "esp_log.h"
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "driver/gpio.h"
-#include <string.h>
-#include <math.h>
-#include <stdlib.h>
-
-// OpenCV includes - using C-style port for ESP32
-// NOTE: esp32-camera component must be added to dependencies
+#include "ws_client/ws_client.h"
 #include "esp_camera.h"
-
-// TODO: Verify exact OpenCV include path for esp32-opencv component
-// #include "opencv2/core.h"
-// #include "opencv2/imgproc.h"
+#include "esp_log.h"
+#include "driver/gpio.h"          // ← nuevo include
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "img_converters.h"
+#include "esp_timer.h"
+#include <stdlib.h>
+#include <string.h>
 
 static const char *TAG = "[Vision]";
 
-#define STREAM_FRAME_INTERVAL 3
-#define STREAM_JPEG_QUALITY_DEFAULT 60
-#define STREAM_JPEG_QUALITY_MIN 30
-#define STREAM_JPEG_QUALITY_STEP 10
-
-typedef struct
-{
-    uint8_t h_min;
-    uint8_t h_max;
-    uint8_t s_min;
-    uint8_t s_max;
-    uint8_t v_min;
-    uint8_t v_max;
-    bool wrap;
-} hsv_range_t;
-
-static const hsv_range_t kGreenRange = {
-    .h_min = HSV_GREEN_H_MIN,
-    .h_max = HSV_GREEN_H_MAX,
-    .s_min = HSV_GREEN_S_MIN,
-    .s_max = HSV_GREEN_S_MAX,
-    .v_min = HSV_GREEN_V_MIN,
-    .v_max = HSV_GREEN_V_MAX,
-    .wrap = (HSV_GREEN_H_MIN > HSV_GREEN_H_MAX)};
-
-static inline void rgb565_to_hsv_fast(uint16_t pixel, uint8_t *h, uint8_t *s, uint8_t *v)
-{
-    uint8_t r = (pixel & 0xF800) >> 8;
-    uint8_t g = (pixel & 0x07E0) >> 3;
-    uint8_t b = (pixel & 0x001F) << 3;
-
-    uint8_t min_val = (r < g) ? (r < b ? r : b) : (g < b ? g : b);
-    uint8_t max_val = (r > g) ? (r > b ? r : b) : (g > b ? g : b);
-    uint8_t delta = max_val - min_val;
-
-    *v = max_val;
-
-    if (delta == 0)
-    {
-        *h = 0;
-        *s = 0;
-        return;
-    }
-
-    *s = (uint16_t)(delta << 8) / max_val;
-
-    if (r == max_val)
-    {
-        *h = (g >= b) ? (43 * (g - b)) / delta : 255 + (43 * (g - b)) / delta;
-    }
-    else if (g == max_val)
-    {
-        *h = 85 + (43 * (b - r)) / delta;
-    }
-    else
-    {
-        *h = 171 + (43 * (r - g)) / delta;
-    }
-}
-
-static inline bool hsv_in_range(uint8_t h, uint8_t s, uint8_t v, const hsv_range_t *range)
-{
-    if (s < range->s_min || s > range->s_max)
-    {
-        return false;
-    }
-
-    if (v < range->v_min || v > range->v_max)
-    {
-        return false;
-    }
-
-    if (!range->wrap)
-    {
-        return (h >= range->h_min) && (h <= range->h_max);
-    }
-
-    return (h >= range->h_min) || (h <= range->h_max);
-}
-
-// ============================================================================
-// GLOBAL STATE
-// ============================================================================
-
-static TaskHandle_t s_vision_task_handle = NULL;
+// Estado global restaurado
+static TaskHandle_t s_task_handle = NULL;
 static SemaphoreHandle_t s_result_mutex = NULL;
 static vision_result_t s_last_result = {0};
-static bool s_veto_active = false;
-static bool s_debug_enabled = false;
 static bool s_task_running = false;
+static bool s_reverse_only_mode = false;
+static int64_t s_last_stream_us = 0; // seguimiento de streaming
 
-// Statistics
-static uint32_t s_frame_counter = 0;
-static uint64_t s_total_process_time_us = 0;
+/* Parámetros del detector */
+#define ORANGE_R_MIN            185
+#define ORANGE_G_MIN             70
+#define ORANGE_G_MAX            180
+#define ORANGE_B_MAX             90
+#define ORANGE_RG_DELTA_MIN      40
+#define ORANGE_RB_DELTA_MIN      85
+#define ORANGE_MIN_PIXELS        400
+#define ORANGE_MIN_FRACTION      0.010f   // 1 % del frame
+#define ORANGE_MIN_PIXELS_PER_ROW 25
+#define ORANGE_MIN_ROWS           8
+#define ORANGE_DISTANCE_LOCK_CM  35.0f
 
-#if defined(CAM_FLASH_LED_GPIO) && (CAM_FLASH_LED_GPIO >= 0)
-static void disable_camera_flash_led(void)
-{
-    gpio_config_t cfg = {
-        .pin_bit_mask = (1ULL << CAM_FLASH_LED_GPIO),
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-    };
+#define CAM_JPEG_QUALITY 10
+#define STREAM_JPEG_QUALITY     25
+#define STREAM_MIN_INTERVAL_US  (120 * 1000)
 
-    gpio_config(&cfg);
-    gpio_set_level(CAM_FLASH_LED_GPIO, 0);
-    ESP_LOGI(TAG, "Camera flash LED forced LOW (GPIO%d)", CAM_FLASH_LED_GPIO);
-}
-#else
-static inline void disable_camera_flash_led(void) {}
+#if (CAM_PIXEL_FORMAT != PIXFORMAT_RGB565)
+#error "vision_engine requiere CAM_PIXEL_FORMAT = PIXFORMAT_RGB565"
 #endif
 
-static bool stream_frame_over_ws(camera_fb_t *fb)
+static inline uint8_t rgb565_r(uint16_t pixel) { return (pixel & 0xF800) >> 8; }
+static inline uint8_t rgb565_g(uint16_t pixel) { return (pixel & 0x07E0) >> 3; }
+static inline uint8_t rgb565_b(uint16_t pixel) { return (pixel & 0x001F) << 3; }
+
+static inline bool pixel_is_orange(uint16_t pixel)
 {
-    if (!ws_client_is_connected() || !ws_client_stream_enabled())
-    {
+    uint8_t r = rgb565_r(pixel);
+    uint8_t g = rgb565_g(pixel);
+    uint8_t b = rgb565_b(pixel);
+
+    if (r < ORANGE_R_MIN || g < ORANGE_G_MIN || g > ORANGE_G_MAX || b > ORANGE_B_MAX) {
         return false;
     }
 
-    int quality = STREAM_JPEG_QUALITY_DEFAULT;
+    int rg_delta = r - g;
+    int rb_delta = r - b;
 
-    while (quality >= STREAM_JPEG_QUALITY_MIN)
-    {
-        uint8_t *jpeg_buf = NULL;
-        size_t jpeg_len = 0;
-
-        if (!frame2jpg(fb, quality, &jpeg_buf, &jpeg_len))
-        {
-            ESP_LOGE(TAG, "frame2jpg failed at quality %d", quality);
-            return false;
-        }
-
-        if (jpeg_len > (WS_MAX_PAYLOAD_SIZE - 128) && quality > STREAM_JPEG_QUALITY_MIN)
-        {
-            ESP_LOGW(TAG, "JPEG %d bytes > limit %d @Q%d, retrying",
-                     (int)jpeg_len, WS_MAX_PAYLOAD_SIZE, quality);
-            free(jpeg_buf);
-            quality -= STREAM_JPEG_QUALITY_STEP;
-            continue;
-        }
-
-        esp_err_t err = ws_client_send_frame(jpeg_buf, jpeg_len);
-        free(jpeg_buf);
-
-        if (err != ESP_OK)
-        {
-            ESP_LOGW(TAG, "WebSocket send failed: %s", esp_err_to_name(err));
-            return false;
-        }
-
-        return true;
-    }
-
-    ESP_LOGE(TAG, "Unable to compress frame under %d bytes", WS_MAX_PAYLOAD_SIZE);
-    return false;
+    return (rg_delta >= ORANGE_RG_DELTA_MIN) && (rb_delta >= ORANGE_RB_DELTA_MIN);
 }
 
-// ============================================================================
-// CAMERA INITIALIZATION
-// ============================================================================
-
-/**
- * @brief Configure camera with AI Thinker ESP32-CAM pinout
- */
-static esp_err_t init_camera(void)
+static inline float estimate_distance(int pixel_width)
 {
-    ESP_LOGI(TAG, "Initializing OV2640 camera...");
+    if (pixel_width <= 0) {
+        return 999.0f;
+    }
+    return (KNOWN_OBJECT_WIDTH_CM * CAMERA_FOCAL_LENGTH_PX) / (float)pixel_width;
+}
 
+static esp_err_t configure_camera(void)
+{
     camera_config_t config = {
         .pin_pwdn = CAM_PIN_PWDN,
         .pin_reset = CAM_PIN_RESET,
         .pin_xclk = CAM_PIN_XCLK,
         .pin_sccb_sda = CAM_PIN_SIOD,
         .pin_sccb_scl = CAM_PIN_SIOC,
-
         .pin_d7 = CAM_PIN_Y9,
         .pin_d6 = CAM_PIN_Y8,
         .pin_d5 = CAM_PIN_Y7,
@@ -219,391 +95,261 @@ static esp_err_t init_camera(void)
         .pin_vsync = CAM_PIN_VSYNC,
         .pin_href = CAM_PIN_HREF,
         .pin_pclk = CAM_PIN_PCLK,
-
-        // Camera settings
-        .xclk_freq_hz = 20000000, // 20MHz XCLK
+        .xclk_freq_hz = 20000000,
         .ledc_timer = LEDC_TIMER_1,
         .ledc_channel = LEDC_CHANNEL_2,
-
-        .pixel_format = CAM_PIXEL_FORMAT, // RGB565 for processing
-        .frame_size = CAM_FRAME_SIZE,     // QVGA (320x240)
-        .jpeg_quality = CAM_JPEG_QUALITY, // Not used for RGB565
-        .fb_count = CAM_FB_COUNT,         // Double buffering
-        .fb_location = CAM_FB_LOCATION,   // PSRAM (critical!)
-        .grab_mode = CAMERA_GRAB_LATEST   // Always get latest frame
+        .pixel_format = CAM_PIXEL_FORMAT,
+        .frame_size = CAM_FRAME_SIZE,
+        .jpeg_quality = CAM_JPEG_QUALITY,
+        .fb_count = 2,
+        .fb_location = CAMERA_FB_IN_PSRAM,
+        .grab_mode = CAMERA_GRAB_LATEST
     };
 
     esp_err_t err = esp_camera_init(&config);
-    if (err != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Camera init failed with error 0x%x", err);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Camera init failed (0x%x)", err);
         return err;
     }
 
-    disable_camera_flash_led();
-
-    // Camera sensor tuning
-    sensor_t *s = esp_camera_sensor_get();
-    if (s == NULL)
-    {
-        ESP_LOGE(TAG, "Failed to get camera sensor");
-        return ESP_FAIL;
+    sensor_t *sensor = esp_camera_sensor_get();
+    if (sensor) {
+        sensor->set_pixformat(sensor, PIXFORMAT_RGB565);
+        sensor->set_framesize(sensor, CAM_FRAME_SIZE);
+        if (sensor->set_whitebal) sensor->set_whitebal(sensor, 0);   // desactiva AWB auto
+        if (sensor->set_awb_gain) sensor->set_awb_gain(sensor, 0);
+        if (sensor->set_wb_mode)  sensor->set_wb_mode(sensor, 2);    // Daylight
+        if (sensor->set_brightness) sensor->set_brightness(sensor, 1);
+        if (sensor->set_contrast)   sensor->set_contrast(sensor, 1);
     }
 
-    // Optimize for vision processing (not aesthetics)
-    s->set_brightness(s, 0);                 // Default brightness
-    s->set_contrast(s, 0);                   // Default contrast
-    s->set_saturation(s, 0);                 // Default saturation
-    s->set_special_effect(s, 0);             // No special effects
-    s->set_whitebal(s, 1);                   // Auto white balance ON
-    s->set_awb_gain(s, 1);                   // Auto white balance gain ON
-    s->set_wb_mode(s, 0);                    // White balance mode auto
-    s->set_exposure_ctrl(s, 1);              // Auto exposure ON
-    s->set_aec2(s, 0);                       // AEC sensor ON
-    s->set_ae_level(s, 0);                   // Auto exposure level 0
-    s->set_aec_value(s, 300);                // Auto exposure value
-    s->set_gain_ctrl(s, 1);                  // Auto gain ON
-    s->set_agc_gain(s, 0);                   // Auto gain value
-    s->set_gainceiling(s, (gainceiling_t)0); // Gain ceiling
-    s->set_bpc(s, 0);                        // Black pixel correction OFF
-    s->set_wpc(s, 1);                        // White pixel correction ON
-    s->set_raw_gma(s, 1);                    // Gamma correction ON
-    s->set_lenc(s, 1);                       // Lens correction ON
-    s->set_hmirror(s, 0);                    // Horizontal mirror OFF
-    s->set_vflip(s, 0);                      // Vertical flip OFF
-    s->set_dcw(s, 1);                        // Downsize enable ON
-    s->set_colorbar(s, 0);                   // Color bar test pattern OFF
+#if defined(CAM_FLASH_LED_GPIO) && (CAM_FLASH_LED_GPIO >= 0)
+    gpio_config_t cfg = {
+        .pin_bit_mask = (1ULL << CAM_FLASH_LED_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+    };
+    gpio_config(&cfg);
+    gpio_set_level(CAM_FLASH_LED_GPIO, 0);
+#endif
 
-    ESP_LOGI(TAG, "Camera initialized successfully");
-    ESP_LOGI(TAG, "Resolution: %dx%d, Format: RGB565, Buffers: %d (PSRAM)",
-             IMAGE_WIDTH, IMAGE_HEIGHT, CAM_FB_COUNT);
-
+    ESP_LOGI(TAG, "Camera ready: %dx%d RGB565", IMAGE_WIDTH, IMAGE_HEIGHT);
     return ESP_OK;
 }
 
-// ============================================================================
-// IMAGE PROCESSING FUNCTIONS
-// ============================================================================
-
-/**
- * @brief Estimate distance using pinhole camera model
- *
- * Formula: distance = (real_width * focal_length) / pixel_width
- *
- * @param pixel_width Width of object in pixels
- * @return Estimated distance in centimeters
- */
-static inline float estimate_distance(int pixel_width)
+static void stream_frame_over_ws(camera_fb_t *fb)
 {
-    if (pixel_width <= 0)
-        return 999.9f; // Invalid
-
-    float distance = (KNOWN_OBJECT_WIDTH_CM * CAMERA_FOCAL_LENGTH_PX) / (float)pixel_width;
-    return distance;
-}
-
-/**
- * @brief Process single frame for green obstacle detection
- *
- * Pipeline:
- * 1. Get RGB565 frame from camera (zero-copy)
- * 2. Convert RGB565 -> BGR888 -> HSV
- * 3. Threshold for green color
- * 4. Morphological filtering (noise removal)
- * 5. Find contours
- * 6. Calculate largest object bounding box
- * 7. Estimate distance
- *
- * @param[out] result Detection result structure
- * @return ESP_OK on success
- */
-static esp_err_t process_frame(vision_result_t *result)
-{
-    uint64_t start_time = esp_timer_get_time();
-
-    // 1. Capture frame
-    camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb)
-    {
-        ESP_LOGW(TAG, "Camera capture failed");
-        return ESP_FAIL;
+    if (!ws_client_is_connected() || !ws_client_stream_enabled()) {
+        return;
     }
 
-    ESP_LOGD(TAG, "Frame captured: %dx%d, %zu bytes, format=%d",
-             fb->width, fb->height, fb->len, fb->format);
+    int64_t now = esp_timer_get_time();
+    if ((now - s_last_stream_us) < STREAM_MIN_INTERVAL_US) {
+        return;
+    }
 
-    // Initialize result
-    result->obstacle_detected = false;
-    result->distance_cm = 999.9f;
-    result->centroid_x = 0;
-    result->centroid_y = 0;
-    result->contour_area = 0;
+    const uint8_t *payload = fb->buf;
+    size_t payload_len = fb->len;
+    uint8_t *jpeg_buf = NULL;
+    bool owns_buffer = false;
+
+    if (fb->format != PIXFORMAT_JPEG) {
+        if (!frame2jpg(fb, STREAM_JPEG_QUALITY, &jpeg_buf, &payload_len)) {
+            ESP_LOGW(TAG, "frame2jpg failed");
+            return;
+        }
+        payload = jpeg_buf;
+        owns_buffer = true;
+    }
+
+    if (payload_len > WS_MAX_PAYLOAD_SIZE) {
+        ESP_LOGW(TAG, "JPEG %dB > límite %dB; reduce calidad o tamaño",
+                 (int)payload_len, WS_MAX_PAYLOAD_SIZE);
+    } else {
+        if (ws_client_send_frame(payload, payload_len) == ESP_OK) {
+            s_last_stream_us = now;
+        }
+    }
+
+    if (owns_buffer && jpeg_buf) {
+        free(jpeg_buf);
+    }
+}
+
+static void analyze_frame(vision_result_t *result)
+{
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) {
+        ESP_LOGW(TAG, "Frame grab failed");
+        *result = (vision_result_t){0};
+        return;
+    }
+
+    if (fb->format != PIXFORMAT_RGB565) {
+        ESP_LOGW(TAG, "Unexpected pixel format: %d", fb->format);
+        esp_camera_fb_return(fb);
+        *result = (vision_result_t){0};
+        return;
+    }
 
     const uint16_t *pixels = (const uint16_t *)fb->buf;
-    uint32_t sum_x = 0;
-    uint32_t sum_y = 0;
-    uint32_t hit_count = 0;
-    int min_x = fb->width;
-    int max_x = -1;
-    int min_y = fb->height;
-    int max_y = -1;
+    uint32_t min_pixels = (uint32_t)(fb->width * fb->height * ORANGE_MIN_FRACTION);
+    if (min_pixels < ORANGE_MIN_PIXELS) {
+        min_pixels = ORANGE_MIN_PIXELS;
+    }
 
-    for (int y = 0; y < fb->height; y++)
-    {
-        const uint16_t *row = pixels + (y * fb->width);
-        for (int x = 0; x < fb->width; x++)
-        {
-            uint8_t h, s, v;
-            rgb565_to_hsv_fast(row[x], &h, &s, &v);
+    int min_x = fb->width, max_x = -1;
+    int min_y = fb->height, max_y = -1;
+    uint32_t hits = 0;
+    uint32_t valid_rows = 0;
 
-            if (!hsv_in_range(h, s, v, &kGreenRange))
-            {
+    for (int y = 0; y < fb->height; ++y) {
+        uint32_t row_hits = 0;
+        const uint16_t *row = pixels + y * fb->width;
+        for (int x = 0; x < fb->width; ++x) {
+            if (!pixel_is_orange(row[x])) {
                 continue;
             }
+            row_hits++;
+            if (x < min_x) min_x = x;
+            if (x > max_x) max_x = x;
+        }
 
-            sum_x += x;
-            sum_y += y;
-            hit_count++;
-
-            if (x < min_x)
-                min_x = x;
-            if (x > max_x)
-                max_x = x;
-            if (y < min_y)
-                min_y = y;
-            if (y > max_y)
-                max_y = y;
+        if (row_hits >= ORANGE_MIN_PIXELS_PER_ROW) {
+            valid_rows++;
+            if (y < min_y) min_y = y;
+            if (y > max_y) max_y = y;
+            hits += row_hits;
         }
     }
 
-    const int image_area = fb->width * fb->height;
-    const int max_allowed_area = (int)(image_area * MAX_CONTOUR_AREA_RATIO);
+    vision_result_t local = {
+        .obstacle_detected = (hits >= min_pixels) && (valid_rows >= ORANGE_MIN_ROWS),
+        .distance_cm = 999.0f,
+        .reverse_only = false
+    };
 
-    if (hit_count >= MIN_CONTOUR_AREA && hit_count < (uint32_t)max_allowed_area && max_x >= 0)
-    {
-        result->obstacle_detected = true;
-        result->centroid_x = sum_x / hit_count;
-        result->centroid_y = sum_y / hit_count;
-        result->contour_area = hit_count;
-
-        int bbox_width = (max_x - min_x) + 1;
-        result->distance_cm = estimate_distance(bbox_width);
-
-        if (s_debug_enabled)
-        {
-            ESP_LOGI(TAG, "Obstáculo verde: %.1f cm @ (%d,%d) area=%d",
-                     result->distance_cm, result->centroid_x, result->centroid_y, result->contour_area);
-        }
-    }
-    else
-    {
-        result->obstacle_detected = false;
-        result->distance_cm = 999.9f;
+    if (local.obstacle_detected && max_x >= min_x && max_y >= min_y) {
+        int bbox_width  = (max_x - min_x) + 1;
+        int bbox_height = (max_y - min_y) + 1;
+        int dominant_px = bbox_width > bbox_height ? bbox_width : bbox_height;
+        local.distance_cm = estimate_distance(dominant_px);
+        local.reverse_only = (local.distance_cm <= ORANGE_DISTANCE_LOCK_CM);
     }
 
-    uint32_t frame_index = ++s_frame_counter;
-    result->frame_count = frame_index;
-
-    if ((frame_index % STREAM_FRAME_INTERVAL) == 0)
-    {
-        stream_frame_over_ws(fb);
-    }
-
-    // Return frame buffer to driver
+    stream_frame_over_ws(fb);
     esp_camera_fb_return(fb);
-
-    // Calculate processing time
-    uint64_t end_time = esp_timer_get_time();
-    result->processing_time_ms = (end_time - start_time) / 1000;
-    if (result->frame_count == 0)
-    {
-        result->frame_count = ++s_frame_counter;
-    }
-
-    ESP_LOGD(TAG, "Frame processed in %u ms", result->processing_time_ms);
-
-    return ESP_OK;
+    *result = local;
 }
 
-// ============================================================================
-// VISION PROCESSING TASK
-// ============================================================================
-
-/**
- * @brief Main vision processing task (runs on Core 1)
- */
-static void vision_task(void *pvParameters)
+static void vision_task(void *param)
 {
-    ESP_LOGI(TAG, "Vision task started on core %d", xPortGetCoreID());
+    ESP_LOGI(TAG, "Vision task running on core %d", xPortGetCoreID());
+    const TickType_t period = pdMS_TO_TICKS(120); // ~8 FPS
+    TickType_t last = xTaskGetTickCount();
 
-    vision_result_t result;
-    TickType_t last_wake_time = xTaskGetTickCount();
-    const TickType_t frame_period = pdMS_TO_TICKS(100); // ~10 FPS target
+    while (s_task_running) {
+        vision_result_t result = {0};
+        analyze_frame(&result);
 
-    while (s_task_running)
-    {
-        // Process frame
-        if (process_frame(&result) == ESP_OK)
-        {
-            // Update shared state (thread-safe)
-            if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(10)))
-            {
-                memcpy(&s_last_result, &result, sizeof(vision_result_t));
-
-                // Update veto flag
-                s_veto_active = (result.obstacle_detected &&
-                                 result.distance_cm < VETO_DISTANCE_THRESHOLD_CM);
-
-                if (s_veto_active && s_debug_enabled)
-                {
-                    ESP_LOGW(TAG, "VETO ACTIVE: Obstacle at %.1f cm (threshold %.1f cm)",
-                             result.distance_cm, VETO_DISTANCE_THRESHOLD_CM);
-                }
-
-                xSemaphoreGive(s_result_mutex);
-            }
-
-            // Update statistics
-            s_total_process_time_us += result.processing_time_ms * 1000;
+        if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(5))) {
+            s_last_result = result;
+            s_reverse_only_mode = result.reverse_only;
+            xSemaphoreGive(s_result_mutex);
         }
 
-        // Rate limiting
-        vTaskDelayUntil(&last_wake_time, frame_period);
+        vTaskDelayUntil(&last, period);
     }
 
     ESP_LOGI(TAG, "Vision task stopped");
     vTaskDelete(NULL);
 }
 
-// ============================================================================
-// PUBLIC API IMPLEMENTATION
-// ============================================================================
-
 esp_err_t vision_engine_init(void)
 {
-    ESP_LOGI(TAG, "Initializing vision engine...");
-
-    // Create mutex for thread-safe access
-    s_result_mutex = xSemaphoreCreateMutex();
-    if (s_result_mutex == NULL)
-    {
-        ESP_LOGE(TAG, "Failed to create result mutex");
-        return ESP_FAIL;
+    if (s_result_mutex == NULL) {
+        s_result_mutex = xSemaphoreCreateMutex();
+        if (s_result_mutex == NULL) {
+            ESP_LOGE(TAG, "Mutex alloc failed");
+            return ESP_FAIL;
+        }
     }
-
-    // Initialize camera
-    esp_err_t ret = init_camera();
-    if (ret != ESP_OK)
-    {
-        return ret;
-    }
-
-    ESP_LOGI(TAG, "Vision engine initialized successfully");
-    return ESP_OK;
+    return configure_camera();
 }
 
 esp_err_t vision_engine_start(void)
 {
-    if (s_task_running)
-    {
-        ESP_LOGW(TAG, "Vision task already running");
+    if (s_task_running) {
+        ESP_LOGW(TAG, "Vision already running");
         return ESP_OK;
     }
 
     s_task_running = true;
-
-    // Create vision processing task on Core 1 (Application CPU)
     BaseType_t ret = xTaskCreatePinnedToCore(
         vision_task,
         "vision_task",
-        8192, // Stack size (8KB - OpenCV needs substantial stack)
+        4096,
         NULL,
-        6, // High priority (same as control task)
-        &s_vision_task_handle,
-        1 // Core 1 (Application CPU)
-    );
+        5,
+        &s_task_handle,
+        1);
 
-    if (ret != pdPASS)
-    {
-        ESP_LOGE(TAG, "Failed to create vision task");
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Task creation failed");
         s_task_running = false;
         return ESP_FAIL;
     }
-
-    ESP_LOGI(TAG, "Vision processing task started on Core 1");
     return ESP_OK;
 }
 
 esp_err_t vision_engine_stop(void)
 {
-    if (!s_task_running)
-    {
+    if (!s_task_running) {
         return ESP_OK;
     }
 
     s_task_running = false;
-
-    // Wait for task to terminate
-    if (s_vision_task_handle)
-    {
-        vTaskDelay(pdMS_TO_TICKS(200)); // Give task time to exit
-        s_vision_task_handle = NULL;
-    }
-
-    ESP_LOGI(TAG, "Vision processing stopped");
+    vTaskDelay(pdMS_TO_TICKS(100));
+    s_task_handle = NULL;
     return ESP_OK;
 }
 
 esp_err_t vision_engine_get_result(vision_result_t *result)
 {
-    if (result == NULL)
-    {
+    if (!result) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(100)))
-    {
+    if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(20))) {
         memcpy(result, &s_last_result, sizeof(vision_result_t));
         xSemaphoreGive(s_result_mutex);
         return ESP_OK;
     }
-
     return ESP_ERR_TIMEOUT;
 }
 
 bool vision_engine_is_veto_active(void)
 {
-    bool veto = false;
-
-    if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(10)))
-    {
-        veto = s_veto_active;
+    bool active;
+    if (xSemaphoreTake(s_result_mutex, pdMS_TO_TICKS(10))) {
+        active = s_reverse_only_mode;
         xSemaphoreGive(s_result_mutex);
+    } else {
+        active = false;
     }
-
-    return veto;
+    return active;
 }
 
-camera_fb_t *vision_engine_get_frame(void)
+bool vision_engine_command_allowed(control_command_t command)
 {
-    return esp_camera_fb_get();
-}
-
-void vision_engine_get_stats(float *avg_fps, float *avg_process_time_ms)
-{
-    if (avg_fps)
-    {
-        *avg_fps = (s_frame_counter > 0) ? (s_frame_counter / (esp_timer_get_time() / 1000000.0f)) : 0.0f;
+    if (!vision_engine_is_veto_active()) {
+        return true;
     }
 
-    if (avg_process_time_ms)
-    {
-        *avg_process_time_ms = (s_frame_counter > 0) ? (s_total_process_time_us / (float)s_frame_counter / 1000.0f) : 0.0f;
+    switch (command) {
+    case CONTROL_CMD_BACKWARD:
+    case CONTROL_CMD_STOP:
+        return true;
+    default:
+        return false;
     }
-}
-
-void vision_engine_set_debug(bool enable)
-{
-    s_debug_enabled = enable;
-    ESP_LOGI(TAG, "Debug visualization %s", enable ? "ENABLED" : "DISABLED");
 }

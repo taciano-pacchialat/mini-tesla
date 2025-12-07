@@ -66,11 +66,11 @@ extern "C"
 // ============================================================================
 // CAMERA CONFIGURATION
 // ============================================================================
-#define CAM_FRAME_SIZE FRAMESIZE_QVGA      // 320x240 (optimal for ESP32)
-#define CAM_PIXEL_FORMAT PIXFORMAT_RGB565  // Raw 16-bit for processing
-#define CAM_FB_COUNT 2                     // Double buffering
-#define CAM_JPEG_QUALITY 12                // For streaming (if needed)
-#define CAM_FB_LOCATION CAMERA_FB_IN_PSRAM // CRITICAL: Use external PSRAM
+#define CAM_PIXEL_FORMAT        PIXFORMAT_RGB565   // Requisito del vision_engine
+#define CAM_FRAME_SIZE          FRAMESIZE_QVGA     // 320x240
+#define CAM_FB_COUNT            2                  // Doble buffer para análisis + streaming
+#define CAM_FB_LOCATION         CAMERA_FB_IN_PSRAM
+#define CAM_JPEG_QUALITY        12                 // Se usa solo al cambiar a modo JPEG
 
 // ============================================================================
 // VISION PARAMETERS - HSV Color Ranges for Obstacle Detection
@@ -101,9 +101,9 @@ extern "C"
 
 // Distance estimation (pinhole camera model)
 // Formula: distance = (real_width * focal_length) / pixel_width
-#define KNOWN_OBJECT_WIDTH_CM 10.0f      // Real width of obstacle in cm
-#define CAMERA_FOCAL_LENGTH_PX 400.0f    // Calibrated focal length (adjust experimentally)
-#define VETO_DISTANCE_THRESHOLD_CM 25.0f // Stop if obstacle < 25cm
+#define KNOWN_OBJECT_WIDTH_CM   10.0f
+#define CAMERA_FOCAL_LENGTH_PX  360.0f             // Ajustado tras recalibración rápida
+#define VETO_DISTANCE_THRESHOLD_CM 35.0f           // Modo reversa a <35 cm reales
 
 // ============================================================================
 // MEMORY AND PERFORMANCE
