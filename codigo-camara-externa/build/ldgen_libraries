@@ -176,6 +176,3 @@
 /home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/build/esp-idf/espressif__esp_jpeg/libespressif__esp_jpeg.a
 /home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/build/esp-idf/main/libmain.a
 /home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/build/esp-idf/espressif__esp32-camera/libespressif__esp32-camera.a
-/home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/main/opencv/libopencv_imgcodecs.a
-/home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/main/opencv/libopencv_imgproc.a
-/home/taci/unlp/taller-de-proyecto-ii/mini-tesla/codigo-camara-externa/main/opencv/libopencv_core.a

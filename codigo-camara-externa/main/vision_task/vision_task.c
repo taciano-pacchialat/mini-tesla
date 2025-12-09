@@ -11,16 +11,25 @@
 
 static const char *TAG = "VisionTask";
 
-extern const color_range_t COLOR_ORANGE;
+extern const color_range_t COLOR_GREEN;
 
 static TaskHandle_t vision_task_handle = NULL;
 static QueueHandle_t frame_queue = NULL;
-static const color_range_t *current_color = &COLOR_ORANGE;
-static const char *current_color_name = "ORANGE";
+static const color_range_t *current_color = &COLOR_GREEN;
+static const char *current_color_name = "GREEN";
 static bool processing_enabled = true;
 static homography_matrix_t h_matrix;
 
-static const float HOMOGRAPHY_S3_COEFFS[9] = {0.215841f, -0.038741f, -13.556207f, -0.134921f, -0.597509f, 138.725449f, -0.001223f, 0.000375f, 1.000000f};
+static const float HOMOGRAPHY_S3_COEFFS[9] = {
+    0.019589f, 0.131092f, -18.746062f,
+    0.146993f, -0.040383f, -14.300678f,
+    -0.000866f, 0.000009f, 1.000000f};
+
+static void configure_homography_matrix(void)
+{
+    homography_init(&h_matrix, HOMOGRAPHY_S3_COEFFS);
+    ESP_LOGI(TAG, "Homografía cargada desde coeficientes pre-calibrados");
+}
 
 /**
  * @brief Convierte camera_fb_t a JPEG
@@ -40,6 +49,7 @@ static void vision_task_function(void *pvParameters)
 
     uint32_t frame_count = 0;
     uint32_t last_fps_time = esp_timer_get_time() / 1000;
+    detection_result_t detection = {0};
 
     while (1)
     {
@@ -52,10 +62,8 @@ static void vision_task_function(void *pvParameters)
             continue;
         }
 
-        detection_result_t detection = {0};
-
         // Procesar detección si está habilitado
-        if (processing_enabled && fb->format == PIXFORMAT_RGB565)
+        if (processing_enabled)
         {
             detect_object_by_color(
                 (uint16_t *)fb->buf,
@@ -123,8 +131,8 @@ esp_err_t vision_task_start(void)
         return ESP_ERR_INVALID_STATE;
     }
 
-    // Inicializa la homografía con los coeficientes calibrados del ESP32-S3
-    homography_init(&h_matrix, HOMOGRAPHY_S3_COEFFS);
+    // Inicializa la homografía resolviendo con los últimos puntos de calibración
+    configure_homography_matrix();
 
     frame_queue = xQueueCreate(3, sizeof(camera_fb_t *));
     if (frame_queue == NULL)

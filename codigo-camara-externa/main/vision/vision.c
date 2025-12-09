@@ -5,44 +5,60 @@
 
 static const char *TAG = "Vision";
 
-// Rangos de color predefinidos (HSV)
+#define DETECTION_MIN_PIXELS 20U
+
+// Rangos de color predefinidos en HSV (0-255)
 const color_range_t COLOR_RED = {
-    .h_min = 0, .h_max = 20, // Rojo está en ambos extremos del círculo
+    .h_min = 226, .h_max = 20, // Wrap: [226-255] U [0-20]
     .s_min = 100,
     .s_max = 255,
-    .v_min = 100,
+    .v_min = 120,
     .v_max = 255};
 
 const color_range_t COLOR_GREEN = {
-    .h_min = 40, .h_max = 80, .s_min = 60, .s_max = 255, .v_min = 60, .v_max = 255};  // auto (verde)
+    .h_min = 57,
+    .h_max = 113,
+    .s_min = 60,
+    .s_max = 255,
+    .v_min = 60,
+    .v_max = 255};
 
 const color_range_t COLOR_BLUE = {
-    .h_min = 140, .h_max = 180, .s_min = 80, .s_max = 255, .v_min = 80, .v_max = 255};
+    .h_min = 198,
+    .h_max = 255,
+    .s_min = 80,
+    .s_max = 255,
+    .v_min = 80,
+    .v_max = 255};
 
 const color_range_t COLOR_YELLOW = {
-    .h_min = 35, .h_max = 55, .s_min = 100, .s_max = 255, .v_min = 100, .v_max = 255};
+    .h_min = 50,
+    .h_max = 78,
+    .s_min = 100,
+    .s_max = 255,
+    .v_min = 120,
+    .v_max = 255};
 
+// Obstáculo
 const color_range_t COLOR_ORANGE = {
-    .h_min = 10, .h_max = 30, .s_min = 80, .s_max = 255, .v_min = 80, .v_max = 255};  // obstáculo (naranja)
+    .h_min = 14,
+    .h_max = 42,
+    .s_min = 120,
+    .s_max = 255,
+    .v_min = 180,
+    .v_max = 255};
 
-/**
- * Conversión RGB565 a HSV optimizada con aritmética de enteros
- * Basada en la investigación de optimización para ESP32
- */
 void rgb565_to_hsv_fast(uint16_t pixel, uint8_t *h, uint8_t *s, uint8_t *v)
 {
-    // Extracción eficiente de componentes usando máscaras de bits
-    // RGB565: RRRRR GGGGGG BBBBB
-    uint8_t r = (pixel & 0xF800) >> 8; // 5 bits expandidos a 8 bits
-    uint8_t g = (pixel & 0x07E0) >> 3; // 6 bits expandidos a 8 bits
-    uint8_t b = (pixel & 0x001F) << 3; // 5 bits expandidos a 8 bits
+    uint8_t r = (pixel & 0xF800) >> 8;
+    uint8_t g = (pixel & 0x07E0) >> 3;
+    uint8_t b = (pixel & 0x001F) << 3;
 
-    // Encontrar mín y máx usando comparaciones en cascada
     uint8_t min_val = (r < g) ? (r < b ? r : b) : (g < b ? g : b);
     uint8_t max_val = (r > g) ? (r > b ? r : b) : (g > b ? g : b);
     uint8_t delta = max_val - min_val;
 
-    *v = max_val; // Valor es el máximo
+    *v = max_val;
 
     if (delta == 0)
     {
@@ -51,52 +67,38 @@ void rgb565_to_hsv_fast(uint16_t pixel, uint8_t *h, uint8_t *s, uint8_t *v)
         return;
     }
 
-    // Cálculo de Saturación sin flotantes: (delta * 255) / max_val
-    // Optimización: desplazamiento izquierdo en lugar de multiplicación
-    *s = (uint16_t)(delta << 8) / max_val;
+    *s = (uint16_t)(delta << 8) / (max_val ? max_val : 1);
 
-    // Cálculo de Matiz (Hue) usando aritmética entera
-    // El factor 43 aproxima (255 / 6) para escalar los sectores de 60 grados
     if (r == max_val)
     {
-        // Sector rojo-amarillo
         if (g >= b)
-            *h = (43 * (g - b)) / delta;
+            *h = (uint8_t)((43 * (g - b)) / delta);
         else
-            *h = 255 + (43 * (g - b)) / delta; // Wraparound
+            *h = (uint8_t)(255 + (43 * (g - b)) / delta);
     }
     else if (g == max_val)
     {
-        // Sector verde-cian
-        *h = 85 + (43 * (b - r)) / delta;
+        *h = (uint8_t)(85 + (43 * (b - r)) / delta);
     }
     else
     {
-        // Sector azul-magenta
-        *h = 171 + (43 * (r - g)) / delta;
+        *h = (uint8_t)(171 + (43 * (r - g)) / delta);
     }
 }
 
-/**
- * Verifica si un píxel HSV está dentro del rango de color especificado
- */
 static inline bool pixel_in_range(uint8_t h, uint8_t s, uint8_t v, const color_range_t *range)
 {
-    // Verificar saturación y valor primero (más rápido)
     if (s < range->s_min || s > range->s_max)
         return false;
     if (v < range->v_min || v > range->v_max)
         return false;
 
-    // Verificar matiz (puede tener wraparound para rojo)
     if (range->h_min <= range->h_max)
     {
-        // Rango normal
         return (h >= range->h_min && h <= range->h_max);
     }
     else
     {
-        // Wraparound (ej: rojo que cruza 0)
         return (h >= range->h_min || h <= range->h_max);
     }
 }
@@ -137,11 +139,9 @@ void detect_object_by_color(const uint16_t *frame_buffer,
             int idx = y * width + x;
             uint16_t pixel = frame_buffer[idx];
 
-            // Convertir a HSV
             uint8_t h, s, v;
             rgb565_to_hsv_fast(pixel, &h, &s, &v);
 
-            // Verificar si está en rango
             if (pixel_in_range(h, s, v, color_range))
             {
                 sum_x += x;
@@ -152,7 +152,7 @@ void detect_object_by_color(const uint16_t *frame_buffer,
     }
 
     // Calcular centroide si se detectaron píxeles
-    if (count > 0)
+    if (count >= DETECTION_MIN_PIXELS)
     {
         result->centroid_x = sum_x / count;
         result->centroid_y = sum_y / count;
@@ -165,11 +165,9 @@ void detect_object_by_color(const uint16_t *frame_buffer,
             pixel_point_t pixel_pt = {.u = result->centroid_x, .v = result->centroid_y};
             homography_transform(h_matrix, pixel_pt, &result->world_coords);
 
-            // Limitar a la superficie física (0–60 cm en X/Y)
             const float kMin = 0.0f;
-            const float kMax = 60.0f;
-            result->world_coords.x = fminf(fmaxf(result->world_coords.x, kMin), kMax);
-            result->world_coords.y = fminf(fmaxf(result->world_coords.y, kMin), kMax);
+            result->world_coords.x = fmaxf(result->world_coords.x, kMin);
+            result->world_coords.y = fmaxf(result->world_coords.y, kMin);
         }
         else
         {

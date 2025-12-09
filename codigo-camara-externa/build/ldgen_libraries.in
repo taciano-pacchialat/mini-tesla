@@ -176,6 +176,3 @@ $<TARGET_FILE:idf::espressif__esp32-camera>
 $<TARGET_FILE:__idf_espressif__esp_jpeg>
 $<TARGET_FILE:idf::main>
 $<TARGET_FILE:__idf_espressif__esp32-camera>
-$<TARGET_FILE:opencv_imgcodecs>
-$<TARGET_FILE:opencv_imgproc>
-$<TARGET_FILE:opencv_core>

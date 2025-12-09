@@ -31,7 +31,7 @@ esp_err_t camera_init(void)
 
         // Procesamiento local necesita frames crudos para convertir a HSV
         .pixel_format = PIXFORMAT_RGB565,
-        .frame_size = FRAMESIZE_QVGA,
+        .frame_size = FRAMESIZE_VGA,
 
         .jpeg_quality = 12,
         .fb_count = 2, // doble buffer para reducir tearing
@@ -61,7 +61,7 @@ esp_err_t camera_init(void)
     sensor->set_contrast(sensor, 2);
     sensor->set_saturation(sensor, 1);
     sensor->set_hmirror(sensor, 1); // flip horizontal
-    sensor->set_vflip(sensor, 1);   // flip vertical
+    sensor->set_vflip(sensor, 0);   // flip vertical
 
     ESP_LOGI(TAG, "Camera initialized successfully");
     return ESP_OK;
