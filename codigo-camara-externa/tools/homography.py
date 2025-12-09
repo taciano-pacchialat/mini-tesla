@@ -156,7 +156,7 @@ def main() -> None:
     parser.add_argument(
         "--color",
         choices=list(COLOR_RANGES.keys()),
-        default="GREEN",
+        default="ORANGE",
         help="Color a seguir en HSV.",
     )
     parser.add_argument(
