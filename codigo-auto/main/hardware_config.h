@@ -42,11 +42,17 @@ extern "C"
 #define CAM_PIN_HREF 23
 #define CAM_PIN_PCLK 22
 
+
+
+// Habilita/deshabilita todos los logs del proyecto
+#define PROJECT_LOG_ENABLED 0
+
+
 // ============================================================================
 // MOTOR PINS - Configuración para L298N Motor Driver
 // ============================================================================
 // Motor A (Izquierdo)
-#define MOTOR_LEFT_PWM 4  // GPIO33 - ENA (PWM) Motor A (keeps flash LED free)
+#define MOTOR_LEFT_PWM 1  // U0T (GPIO1) - ENA (PWM) Motor A
 #define MOTOR_LEFT_IN1 2  // GPIO 2  - IN1 Motor A
 #define MOTOR_LEFT_IN2 14 // GPIO 14 - IN2 Motor A
 
@@ -55,23 +61,27 @@ extern "C"
 #define MOTOR_RIGHT_IN1 15 // GPIO 15 - IN3 Motor B
 #define MOTOR_RIGHT_IN2 13 // GPIO 13 - IN4 Motor B
 
-// LEDC PWM configuration
-#define MOTOR_LEDC_TIMER LEDC_TIMER_0
-#define MOTOR_LEDC_MODE LEDC_LOW_SPEED_MODE
-#define MOTOR_LEDC_CHANNEL_L LEDC_CHANNEL_0
-#define MOTOR_LEDC_CHANNEL_R LEDC_CHANNEL_1
-#define MOTOR_LEDC_DUTY_RES LEDC_TIMER_8_BIT // 0-255 duty cycle
-#define MOTOR_LEDC_FREQUENCY 1000            // 1 kHz PWM
+#define MOTOR_RAMP_ENABLED     1    // 1 = habilita rampas, 0 = directo
+#define MOTOR_RAMP_STEP        20   // incremento/decremento por paso (0-255)
+#define MOTOR_RAMP_INTERVAL_MS 20   // tiempo entre pasos en ms
+
+// Control parameters
+// Manual driving speeds
+#define MANUAL_FORWARD_SPEED            200
+#define MANUAL_BACKWARD_SPEED           200
+#define MANUAL_TURN_SPEED               190
+
 
 // ============================================================================
 // CAMERA CONFIGURATION
 // ============================================================================
 #define CAM_PIXEL_FORMAT        PIXFORMAT_RGB565
-#define CAM_FRAME_SIZE          FRAMESIZE_QVGA      // mayor resolución manteniendo estabilidad
+#define CAM_FRAME_SIZE          FRAMESIZE_VGA      // mayor resolución manteniendo estabilidad
 #define CAM_FB_COUNT            2
-#define CAM_FB_LOCATION         CAMERA_FB_IN_PSRAM
 #define CAM_JPEG_QUALITY         8                  // menor compresión para streaming más nítido
-
+#define STREAM_JPEG_QUALITY     25
+#define STREAM_MIN_INTERVAL_US  (120 * 1000)
+#define CAM_FREQ_HZ 20000000
 // ============================================================================
 // VISION PARAMETERS - HSV Color Ranges for Obstacle Detection
 // ============================================================================
@@ -81,19 +91,16 @@ extern "C"
 // Formula: distance = (real_width * focal_length) / pixel_width
 #define KNOWN_OBJECT_WIDTH_CM   10.0f
 #define CAMERA_FOCAL_LENGTH_PX  320.0f             // Ajustado para objeto naranja tenue
-#define VETO_DISTANCE_THRESHOLD_CM 15.0f           // Modo reversa a <35 cm reales
 
 // ============================================================================
 // MEMORY AND PERFORMANCE
 // ============================================================================
 #define IMAGE_WIDTH 320
 #define IMAGE_HEIGHT 240
-#define RGB565_BYTES_PER_PIXEL 2
-#define BGR888_BYTES_PER_PIXEL 3
 
-// Frame buffer size calculations
-#define FRAME_SIZE_RGB565 (IMAGE_WIDTH * IMAGE_HEIGHT * RGB565_BYTES_PER_PIXEL) // 153.6 KB
-#define FRAME_SIZE_BGR888 (IMAGE_WIDTH * IMAGE_HEIGHT * BGR888_BYTES_PER_PIXEL) // 230.4 KB
+
+
+
 
 #ifdef __cplusplus
 }

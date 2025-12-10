@@ -27,8 +27,7 @@ static bool s_task_running = false;
 static bool s_reverse_only_mode = false;
 static int64_t s_last_stream_us = 0; // seguimiento de streaming
 
-// Definimos frequencia de la camara
-#define CAM_FREQ_HZ 20000000
+
 
 
 /* Parámetros del detector */
@@ -48,9 +47,8 @@ static int64_t s_last_stream_us = 0; // seguimiento de streaming
 #define ORANGE_MIN_ROWS          10
 #define ORANGE_DISTANCE_LOCK_CM  20.0f
 
-#define CAM_JPEG_QUALITY 8
-#define STREAM_JPEG_QUALITY     25
-#define STREAM_MIN_INTERVAL_US  (120 * 1000)
+
+
 
 #if (CAM_PIXEL_FORMAT != PIXFORMAT_RGB565)
 #error "vision_engine requiere CAM_PIXEL_FORMAT = PIXFORMAT_RGB565"
@@ -109,7 +107,7 @@ static esp_err_t configure_camera(void)
         .pixel_format = CAM_PIXEL_FORMAT,
         .frame_size = CAM_FRAME_SIZE,
         .jpeg_quality = CAM_JPEG_QUALITY,
-        .fb_count = 2,
+        .fb_count = CAM_FB_COUNT,
         .fb_location = CAMERA_FB_IN_PSRAM,
         .grab_mode = CAMERA_GRAB_LATEST
     };

@@ -37,6 +37,15 @@ static inline int clamp_speed(int speed)
     return speed;
 }
 
+static inline int step_towards(int current, int target, int step)
+{
+    if (current < target)
+        return (current + step > target) ? target : current + step;
+    if (current > target)
+        return (current - step < target) ? target : current - step;
+    return current;
+}
+
 /**
  * @brief Set L298N motor direction and speed
  *
@@ -55,8 +64,9 @@ static esp_err_t apply_motor_speed_l298n(int in1_gpio, int in2_gpio,
     if (speed > 0)
     {
         // Forward: IN1=HIGH, IN2=LOW
-        gpio_set_level(in1_gpio, 1);
+        
         gpio_set_level(in2_gpio, 0);
+        gpio_set_level(in1_gpio, 1);
     }
     else if (speed < 0)
     {
@@ -156,24 +166,46 @@ esp_err_t motor_set_speed(int left_speed, int right_speed)
     if (!s_motor_mutex)
         return ESP_FAIL;
 
+    left_speed = clamp_speed(left_speed);
+    right_speed = clamp_speed(right_speed);
+
     if (xSemaphoreTake(s_motor_mutex, pdMS_TO_TICKS(100)))
     {
+#if MOTOR_RAMP_ENABLED
+        int curr_left = s_left_speed;
+        int curr_right = s_right_speed;
+
+        while (curr_left != left_speed || curr_right != right_speed)
+        {
+            curr_left = step_towards(curr_left, left_speed, MOTOR_RAMP_STEP);
+            curr_right = step_towards(curr_right, right_speed, MOTOR_RAMP_STEP);
+
+            apply_motor_speed_l298n(MOTOR_LEFT_IN1_GPIO, MOTOR_LEFT_IN2_GPIO,
+                                    LEDC_CHANNEL_0, curr_left);
+            apply_motor_speed_l298n(MOTOR_RIGHT_IN1_GPIO, MOTOR_RIGHT_IN2_GPIO,
+                                    LEDC_CHANNEL_1, curr_right);
+
+            s_left_speed = curr_left;
+            s_right_speed = curr_right;
+
+            vTaskDelay(pdMS_TO_TICKS(MOTOR_RAMP_INTERVAL_MS));
+        }
+#else
         esp_err_t err_left = apply_motor_speed_l298n(
             MOTOR_LEFT_IN1_GPIO, MOTOR_LEFT_IN2_GPIO,
             LEDC_CHANNEL_0, left_speed);
-
         esp_err_t err_right = apply_motor_speed_l298n(
             MOTOR_RIGHT_IN1_GPIO, MOTOR_RIGHT_IN2_GPIO,
             LEDC_CHANNEL_1, right_speed);
 
         if (err_left == ESP_OK && err_right == ESP_OK)
         {
-            s_left_speed = clamp_speed(left_speed);
-            s_right_speed = clamp_speed(right_speed);
+            s_left_speed = left_speed;
+            s_right_speed = right_speed;
         }
-
+#endif
         xSemaphoreGive(s_motor_mutex);
-        return (err_left == ESP_OK && err_right == ESP_OK) ? ESP_OK : ESP_FAIL;
+        return ESP_OK;
     }
     return ESP_FAIL;
 }

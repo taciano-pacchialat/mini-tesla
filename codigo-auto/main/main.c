@@ -29,6 +29,7 @@
 #include "motor_control/motor_control.h"
 #include "autonomous_task/autonomous_task.h"
 #include "vision_engine/vision_engine.h"
+#include "hardware_config.h"
 
 static const char *TAG = "[Main]";
 
@@ -51,9 +52,7 @@ static TaskHandle_t s_vision_log_task = NULL;
 #define STACK_SIZE_CONTROL 4096
 #define STACK_SIZE_MONITOR 2048
 
-// Battery monitoring (optional - using ADC)
-#define BATTERY_ADC_CHANNEL ADC_CHANNEL_0 // GPIO36 on ESP32
-#define BATTERY_VOLTAGE_DIVIDER 2.0f      // Adjust based on your circuit
+
 
 /**
  * @brief Control callback - called when dashboard commands arrive
@@ -252,6 +251,12 @@ static void vision_status_task(void *pvParameters)
  */
 void app_main(void)
 {
+#if !PROJECT_LOG_ENABLED
+    esp_log_level_set("*", ESP_LOG_NONE);
+#else
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set("[WebSocket]", ESP_LOG_DEBUG); // habilita el DEBUG de comandos
+#endif
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "ESP32-CAM Autonomous Vehicle Client");
     ESP_LOGI(TAG, "Vehicle ID: %s", VEHICLE_ID);
