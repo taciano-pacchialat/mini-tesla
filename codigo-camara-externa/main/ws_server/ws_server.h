@@ -6,34 +6,50 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-typedef enum {
+typedef enum
+{
     FRAME_SOURCE_ESP32S3 = 0,
     FRAME_SOURCE_ESP32CAM = 1,
 } frame_source_t;
 
+typedef struct
+{
+    const char *object_type;
+    float distance_cm;
+    float angle_deg;
+    int pixel_x;
+    int pixel_y;
+    float world_x;
+    float world_y;
+    uint32_t pixel_count;
+    bool detected;
+    uint64_t timestamp_ms;
+} telemetry_data_t;
+
 /**
  * @brief Inicializa el servidor WebSocket
- * 
+ *
  * Crea un servidor HTTP con soporte para WebSockets en el puerto 80.
  * Maneja video streaming (JPEG binario) y control manual vía WebSocket.
- * 
+ *
  * @return ESP_OK si la inicialización fue exitosa
  */
-esp_err_t ws_server_start(void);
+esp_err_t
+ws_server_start(void);
 
 /**
  * @brief Detiene el servidor WebSocket
- * 
+ *
  * @return ESP_OK si se detuvo correctamente
  */
 esp_err_t ws_server_stop(void);
 
 /**
  * @brief Envía un frame de video JPEG a todos los clientes
- * 
+ *
  * Envía la imagen como WebSocket binary frame.
  * Usa httpd_ws_send_frame_async para transmisión asíncrona.
- * 
+ *
  * @param jpeg_data Buffer con datos JPEG
  * @param jpeg_len Tamaño del buffer
  * @return ESP_OK si se envió correctamente
@@ -44,14 +60,14 @@ esp_err_t ws_server_send_video_frame(frame_source_t source,
 
 /**
  * @brief Obtiene el número de clientes WebSocket conectados
- * 
+ *
  * @return Número de clientes conectados
  */
 uint8_t ws_server_get_clients_count(void);
 
 /**
  * @brief Verifica si hay al menos un cliente conectado
- * 
+ *
  * @return true si hay clientes conectados
  */
 bool ws_server_has_clients(void);

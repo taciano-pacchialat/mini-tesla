@@ -278,6 +278,10 @@ static esp_err_t ws_forward_control_message(const cJSON *root,
 
     const cJSON *vehicle_id_item = cJSON_GetObjectItem(root, "vehicle_id");
     const char *vehicle_id = (vehicle_id_item && cJSON_IsString(vehicle_id_item)) ? vehicle_id_item->valuestring : NULL;
+    const cJSON *command_item = cJSON_GetObjectItem(root, "command");
+    const char *command = (command_item && cJSON_IsString(command_item)) ? command_item->valuestring : "(unknown)";
+    const cJSON *timestamp_item = cJSON_GetObjectItem(root, "timestamp");
+    int64_t timestamp = (timestamp_item && cJSON_IsNumber(timestamp_item)) ? (int64_t)timestamp_item->valuedouble : 0;
 
     ws_client_t *target = ws_find_vehicle_by_id(vehicle_id);
     if (!target)
@@ -296,6 +300,14 @@ static esp_err_t ws_forward_control_message(const cJSON *root,
         ESP_LOGW(TAG, "Ignorando comando porque el origen es el mismo vehículo");
         return ESP_FAIL;
     }
+
+    ESP_LOGI(TAG,
+             "Control cmd='%s' ts=%lld to vehicle='%s' (fd=%d) via dashboard fd=%d",
+             command,
+             (long long)timestamp,
+             target->vehicle_id[0] ? target->vehicle_id : "(first)",
+             target->fd,
+             source_client ? source_client->fd : -1);
 
     char *json_string = cJSON_PrintUnformatted(root);
     if (!json_string)

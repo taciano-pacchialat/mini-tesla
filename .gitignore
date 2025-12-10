@@ -6,6 +6,7 @@
 *.code-workspace
 .DS_Store
 Thumbs.db
+**/build/
 
 # ------------------------------
 # Python / tooling caches
@@ -14,11 +15,8 @@ __pycache__/
 *.pyc
 *.pyo
 *.pytest_cache/
+**/.venv/
 
-# ------------------------------
-# ESP-IDF build outputs (any subproject)
-# ------------------------------
-**/build/
 **/sdkconfig
 **/sdkconfig.old
 **/sdkconfig.*.bak
