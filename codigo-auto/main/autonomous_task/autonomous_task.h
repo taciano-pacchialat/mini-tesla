@@ -17,11 +17,7 @@
 extern "C" {
 #endif
 
-// Control parameters
-// Manual driving speeds
-#define MANUAL_FORWARD_SPEED            180
-#define MANUAL_BACKWARD_SPEED           160
-#define MANUAL_TURN_SPEED               140
+
 
 // Control states
 typedef enum {

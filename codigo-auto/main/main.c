@@ -11,7 +11,7 @@
  * - WebSocket Client: Dashboard commands + video streaming
  * - Motor Control: MCPWM-based differential drive
  * - Manual Control Task: Applies dashboard commands with local veto
- * - Vision Engine: Local obstacle detection (green objects)
+ * - Vision Engine: Local obstacle detection (orange objects)
  */
 
 #include <stdio.h>
@@ -29,12 +29,14 @@
 #include "motor_control/motor_control.h"
 #include "autonomous_task/autonomous_task.h"
 #include "vision_engine/vision_engine.h"
+#include "hardware_config.h"
 
 static const char *TAG = "[Main]";
 
 // FreeRTOS handles
 static QueueHandle_t command_queue = NULL;
 static EventGroupHandle_t system_events = NULL;
+static TaskHandle_t s_vision_log_task = NULL;
 
 // Event bits
 #define WIFI_CONNECTED_BIT BIT0
@@ -50,9 +52,7 @@ static EventGroupHandle_t system_events = NULL;
 #define STACK_SIZE_CONTROL 4096
 #define STACK_SIZE_MONITOR 2048
 
-// Battery monitoring (optional - using ADC)
-#define BATTERY_ADC_CHANNEL ADC_CHANNEL_0 // GPIO36 on ESP32
-#define BATTERY_VOLTAGE_DIVIDER 2.0f      // Adjust based on your circuit
+
 
 /**
  * @brief Control callback - called when dashboard commands arrive
@@ -105,6 +105,16 @@ static void control_task(void *pvParameters)
         }
 
         bool local_veto = vision_engine_is_veto_active();
+
+        if (!vision_engine_command_allowed(active_command.command)) {
+            ESP_LOGW(TAG,
+                     "[Control] cmd=%d bloqueado por visión (solo reversa)",
+                     active_command.command);
+            active_command.command = CONTROL_CMD_STOP;
+            strncpy(active_command.raw_command, "stop", sizeof(active_command.raw_command) - 1);
+            active_command.raw_command[sizeof(active_command.raw_command) - 1] = '\0';
+        }
+
         if (autonomous_process_with_veto(&active_command, local_veto) != ESP_OK)
         {
             ESP_LOGW(TAG, "Control handler rejected command %s", active_command.raw_command);
@@ -214,10 +224,39 @@ static void monitor_task(void *pvParameters)
 }
 
 /**
+ * @brief Task: Vision Status Logger
+ * Logs vision status at regular intervals
+ */
+static void vision_status_task(void *pvParameters)
+{
+    const TickType_t period = pdMS_TO_TICKS(1000);
+
+    while (true) {
+        vision_result_t vision = {0};
+        if (vision_engine_get_result(&vision) == ESP_OK) {
+            ESP_LOGI(TAG,
+                     "[Vision] naranja=%s, cerca=%s, distancia=%.1f cm",
+                     vision.obstacle_detected ? "SI" : "NO",
+                     vision.reverse_only ? "SI" : "NO",
+                     vision.distance_cm);
+        } else {
+            ESP_LOGW(TAG, "[Vision] sin datos disponibles");
+        }
+        vTaskDelay(period);
+    }
+}
+
+/**
  * @brief Main application entry point
  */
 void app_main(void)
 {
+#if !PROJECT_LOG_ENABLED
+    esp_log_level_set("*", ESP_LOG_NONE);
+#else
+    esp_log_level_set("*", ESP_LOG_INFO);
+    esp_log_level_set("[WebSocket]", ESP_LOG_DEBUG); // habilita el DEBUG de comandos
+#endif
     ESP_LOGI(TAG, "====================================");
     ESP_LOGI(TAG, "ESP32-CAM Autonomous Vehicle Client");
     ESP_LOGI(TAG, "Vehicle ID: %s", VEHICLE_ID);
@@ -249,24 +288,17 @@ void app_main(void)
 
     // Initialize vision engine (local camera-based obstacle detection)
     ESP_LOGI(TAG, "Initializing vision engine...");
-    if (vision_engine_init() != ESP_OK)
-    {
-        ESP_LOGE(TAG, "Failed to initialize vision engine");
-        ESP_LOGW(TAG, "Continuing without local vision (veto disabled)");
-        // Don't return - can operate without local vision, just without veto
-    }
-    else
-    {
-        ESP_LOGI(TAG, "Starting vision processing task...");
-        if (vision_engine_start() != ESP_OK)
-        {
-            ESP_LOGE(TAG, "Failed to start vision task");
-        }
-        else
-        {
-            ESP_LOGI(TAG, "Vision engine running on Core 1");
-        }
-    }
+    ESP_ERROR_CHECK(vision_engine_init());
+    ESP_ERROR_CHECK(vision_engine_start());
+
+    ESP_ERROR_CHECK(xTaskCreatePinnedToCore(
+        vision_status_task,
+        "vision_status_task",
+        2048,
+        NULL,
+        3,
+        &s_vision_log_task,
+        0) == pdPASS ? ESP_OK : ESP_FAIL);
 
     // Initialize autonomous control
     ESP_LOGI(TAG, "Initializing autonomous control...");
