@@ -286,6 +286,26 @@ void app_main(void)
         return;
     }
 
+
+    #if MOTOR_SELFTEST_ENABLED
+    ESP_LOGI(TAG, "Self-test giro izquierda");
+    motor_set_speed(-150, 150);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    int l, r;
+    motor_get_speeds(&l, &r);
+    ESP_LOGI(TAG, "Self-test izq: L=%d R=%d", l, r);
+    vTaskDelay(pdMS_TO_TICKS(4800));
+
+    ESP_LOGI(TAG, "Self-test giro derecha");
+    motor_set_speed(150, -150);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    motor_get_speeds(&l, &r);
+    ESP_LOGI(TAG, "Self-test der: L=%d R=%d", l, r);
+    vTaskDelay(pdMS_TO_TICKS(4800));
+
+    motor_emergency_stop();
+#endif
+
     // Initialize vision engine (local camera-based obstacle detection)
     ESP_LOGI(TAG, "Initializing vision engine...");
     ESP_ERROR_CHECK(vision_engine_init());

@@ -341,6 +341,9 @@ bool vision_engine_is_veto_active(void)
 
 bool vision_engine_command_allowed(control_command_t command)
 {
+    #if !VISION_VETO_ENABLED
+    return true;
+    #endif
     if (!vision_engine_is_veto_active()) {
         return true;
     }
@@ -350,6 +353,6 @@ bool vision_engine_command_allowed(control_command_t command)
     case CONTROL_CMD_STOP:
         return true;
     default:
-        return true; // poner en false para bloquear otros comandos
+        return false; 
     }
 }

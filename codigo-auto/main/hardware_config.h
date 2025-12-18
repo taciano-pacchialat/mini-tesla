@@ -45,8 +45,11 @@ extern "C"
 
 
 // Habilita/deshabilita todos los logs del proyecto
-#define PROJECT_LOG_ENABLED 0
+#define PROJECT_LOG_ENABLED 0   
 
+#define MOTOR_SELFTEST_ENABLED  0
+
+#define VISION_VETO_ENABLED 1  // 1 = habilita veto, 0 = deshabilita
 
 // ============================================================================
 // MOTOR PINS - Configuración para L298N Motor Driver
@@ -58,8 +61,8 @@ extern "C"
 
 // Motor B (Derecho)
 #define MOTOR_RIGHT_PWM 12 // GPIO 12 - ENB (PWM) Motor B
-#define MOTOR_RIGHT_IN1 15 // GPIO 15 - IN3 Motor B
-#define MOTOR_RIGHT_IN2 13 // GPIO 13 - IN4 Motor B
+#define MOTOR_RIGHT_IN1 13 // GPIO 15 - IN3 Motor B
+#define MOTOR_RIGHT_IN2 15 // GPIO 13 - IN4 Motor B
 
 #define MOTOR_RAMP_ENABLED     1    // 1 = habilita rampas, 0 = directo
 #define MOTOR_RAMP_STEP        20   // incremento/decremento por paso (0-255)
@@ -67,9 +70,9 @@ extern "C"
 
 // Control parameters
 // Manual driving speeds
-#define MANUAL_FORWARD_SPEED            200
-#define MANUAL_BACKWARD_SPEED           200
-#define MANUAL_TURN_SPEED               190
+#define MANUAL_FORWARD_SPEED            180
+#define MANUAL_BACKWARD_SPEED           180
+#define MANUAL_TURN_SPEED               150
 
 
 // ============================================================================
